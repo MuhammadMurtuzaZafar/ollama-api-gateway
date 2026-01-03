@@ -2,7 +2,7 @@ import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
-import { Sun, Moon, LogOut, Home, Key, BarChart, MessageSquare, Book } from 'lucide-react';
+import { Sun, Moon, LogOut, Home, Key, BarChart, MessageSquare, Book, Zap } from 'lucide-react';
 
 const Navbar = () => {
   const { user, logout } = useAuth();
@@ -20,11 +20,7 @@ const Navbar = () => {
         <div className="flex justify-between h-16">
           <div className="flex items-center">
             <Link to="/" className="flex items-center space-x-3">
-              <img 
-                src="/assets/TPS-Logo.png" 
-                alt="TPS Logo" 
-                className="h-10 w-auto"
-              />
+              <Zap className="h-8 w-8 text-primary-600 dark:text-primary-400" />
               <div className="border-l border-gray-300 dark:border-gray-600 pl-3">
                 <span className="text-xl font-bold text-gray-900 dark:text-white">
                   Ollama API Gateway

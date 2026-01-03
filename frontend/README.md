@@ -70,8 +70,6 @@ frontend/### Environment Variables
 
 │   └── assets/Create a `.env` file in the frontend directory:
 
-│       ├── TPS-Logo.png           # Company logo
-
 │       ├── logo.svg               # App logo (main)```env
 
 │       ├── logo-icon.svg          # App iconVITE_API_URL=http://localhost:8000
