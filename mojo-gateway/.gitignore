@@ -4,3 +4,6 @@
 
 # Large model files
 *.bin
+
+# Cloned inference repos
+inference/
