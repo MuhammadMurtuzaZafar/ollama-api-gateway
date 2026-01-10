@@ -425,81 +425,95 @@ struct PostgresLogger:
 # ============================================
 
 struct MAXEngine:
+    """Inference engine that proxies to Ollama for real LLM inference."""
     var is_ready: Bool
     var model_name: String
-    var session: PythonObject
-    var model: PythonObject
-    var tokenizer: PythonObject
-    var use_gpu: Bool
+    var ollama_url: String
+    var requests_module: PythonObject
+    var json_module: PythonObject
 
     fn __init__(out self, use_gpu: Bool = False):
         self.is_ready = False
         self.model_name = ""
-        self.session = PythonObject()
-        self.model = PythonObject()
-        self.tokenizer = PythonObject()
-        self.use_gpu = use_gpu
+        self.ollama_url = "http://host.docker.internal:11434"  # Docker host access
+        self.requests_module = PythonObject()
+        self.json_module = PythonObject()
 
     fn initialize(mut self, model_path: String) raises:
-        """Initialize MAX Engine with a model."""
-        print("Initializing MAX Engine...")
-        print("  Model: " + model_path)
-        print("  GPU: " + ("Enabled" if self.use_gpu else "Disabled"))
+        """Initialize connection to Ollama."""
+        print("Initializing Ollama Backend...")
+        print("  Ollama URL: " + self.ollama_url)
 
-        # Try to import MAX Engine
+        # Import Python modules for HTTP requests
         try:
-            var max_engine = Python.import_module("max.engine")
-            var transformers = Python.import_module("transformers")
+            self.requests_module = Python.import_module("urllib.request")
+            self.json_module = Python.import_module("json")
 
-            # Create inference session
-            if self.use_gpu:
-                var GPU = max_engine.GPU
-                self.session = max_engine.InferenceSession(devices=[GPU()])
+            # Use llama3.1 model
+            self.model_name = "llama3.1:8b-instruct-q4_0"
+            print("  Model: " + self.model_name)
+
+            # Test connection to Ollama
+            var test_url = self.ollama_url + "/api/tags"
+            var urllib = Python.import_module("urllib.request")
+            var response = urllib.urlopen(test_url)
+            var status = Int(response.getcode())
+
+            if status == 200:
+                print("  Ollama connection: OK")
+                self.is_ready = True
             else:
-                var CPU = max_engine.CPU
-                self.session = max_engine.InferenceSession(devices=[CPU()])
+                print("  Ollama connection: Failed (status " + String(status) + ")")
+                self.is_ready = False
 
-            # Load tokenizer
-            self.tokenizer = transformers.AutoTokenizer.from_pretrained(PythonObject(model_path))
-
-            print("  MAX Engine session created")
+        except e:
+            print("  Ollama not available: " + String(e))
+            print("  Falling back to mock inference")
             self.model_name = model_path
             self.is_ready = True
 
-        except e:
-            print("  MAX Engine not available, using mock inference")
-            print("  Error: " + String(e))
-            self.model_name = model_path
-            self.is_ready = True  # Still ready with mock
-
     fn generate(self, prompt: String, temperature: Float64, max_tokens: Int) raises -> String:
-        """Generate text using MAX Engine or mock."""
+        """Generate text using Ollama."""
         if not self.is_ready:
             raise Error("Engine not initialized")
 
-        # Try real inference first
         try:
-            # Tokenize input
-            var inputs = self.tokenizer(PythonObject(prompt), return_tensors=PythonObject("pt"))
+            # Build request to Ollama
+            var url = self.ollama_url + "/api/generate"
+            var data = '{"model":"' + self.model_name + '","prompt":"' + escape_json(prompt) + '","stream":false}'
 
-            # For now, return mock response
-            # In production, would call: self.model.execute(inputs)
-            return self._mock_generate(prompt)
+            var urllib = Python.import_module("urllib.request")
+            var json_mod = Python.import_module("json")
 
-        except:
+            # Create request
+            var req = urllib.Request(url)
+            req.add_header("Content-Type", "application/json")
+
+            # Send request - convert to Python bytes
+            var builtins = Python.import_module("builtins")
+            var data_bytes = builtins.bytes(PythonObject(data), PythonObject("utf-8"))
+            var response = urllib.urlopen(req, data_bytes)
+            var response_body = response.read().decode("utf-8")
+
+            # Parse response
+            var result = json_mod.loads(response_body)
+            var text = String(result[PythonObject("response")])
+
+            return text
+
+        except e:
+            print("Ollama error: " + String(e))
             return self._mock_generate(prompt)
 
     fn _mock_generate(self, prompt: String) -> String:
-        """Mock generation for testing."""
+        """Mock generation fallback."""
         var prompt_lower = prompt.lower()
         if "hello" in prompt_lower:
-            return "Hello! I'm the Mojo Gateway powered by MAX Engine. How can I help you today?"
+            return "Hello! I'm the Mojo Gateway. How can I help you today?"
         elif "code" in prompt_lower:
             return "Here's a Mojo function:\n\n```mojo\nfn fibonacci(n: Int) -> Int:\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)\n```"
-        elif "explain" in prompt_lower:
-            return "MAX Engine is a high-performance inference runtime from Modular that provides optimized execution across CPUs and GPUs."
         else:
-            return "I received your request and processed it with Mojo's native performance. What else can I help with?"
+            return "I received your request. What else can I help with?"
 
 
 # ============================================
@@ -655,7 +669,7 @@ struct RequestHandler:
         self.config = config^
         self.key_store = APIKeyStore()
         self.rate_limiter = RateLimiter()
-        self.engine = MAXEngine(self.config.use_gpu)
+        self.engine = MAXEngine(False)
         self.metrics = MetricsCollector()
         self.db_logger = PostgresLogger(self.config)
 
