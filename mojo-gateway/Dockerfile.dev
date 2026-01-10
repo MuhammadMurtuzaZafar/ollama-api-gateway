@@ -1,0 +1,31 @@
+# Development Dockerfile for Mojo Gateway
+# Use this for development on Intel Macs or systems without native Mojo support
+
+FROM python:3.11-slim
+
+# Avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    build-essential \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directory
+WORKDIR /app
+
+# Install Mojo via pip
+RUN pip install --pre mojo \
+    --extra-index-url https://whl.modular.com/nightly/simple/
+
+# Copy project files
+COPY src/ src/
+
+# Verify mojo installation
+RUN mojo --version
+
+# Default command
+CMD ["mojo", "run", "src/main.mojo"]
