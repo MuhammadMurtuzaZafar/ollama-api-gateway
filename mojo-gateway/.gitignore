@@ -7,3 +7,8 @@
 
 # Cloned inference repos
 inference/
+
+# Large model files
+mojo-gateway/models/
+*.safetensors
+*.tmac2.bin

@@ -178,6 +178,63 @@ T-MAC enables running **7x larger models** in the same memory footprint.
 2. **Best results** require training from scratch with ternary constraints
 3. **GPU inference** - Ollama is faster on GPU (this targets CPU/edge)
 
+## BitNet Integration
+
+This project now includes support for Microsoft's BitNet b1.58 models, which are trained from scratch with ternary weights.
+
+### BitNet b1.58-2B-4T Support
+
+We've implemented a full pipeline for running BitNet models:
+
+1. **Model Download** - Fetch from HuggingFace: `microsoft/bitnet-b1.58-2B-4T`
+2. **Conversion** - Convert BitNet's base-3 packed format to T-MAC 2-bit format
+3. **Inference** - Run on CPU with T-MAC-style matrix operations
+
+### BitNet Weight Format
+
+BitNet stores ternary weights using base-3 encoding (4 values per byte):
+```
+byte = w0 + 3*w1 + 9*w2 + 27*w3
+where each w_i ∈ {0, 1, 2} maps to {-1, 0, +1}
+```
+
+Our conversion script (`scripts/convert_bitnet_to_tmac.py`) transforms this to T-MAC's 2-bit format:
+```
+2 bits per weight: 00=0, 01=+1, 11=-1
+```
+
+### BitNet Architecture Differences
+
+BitNet differs from standard LLaMA in several ways:
+- **ReLU² activation** instead of SiLU/GELU
+- **Sub-layer normalization** (attn_sub_norm, ffn_sub_norm)
+- **Higher RoPE theta** (500,000 vs 10,000)
+- **Grouped Query Attention** (20 heads, 5 KV heads)
+
+### Running BitNet Inference
+
+```bash
+# Build with Docker (required for Linux/ARM)
+docker build -f Dockerfile.bitnet -t bitnet-inference .
+
+# Run inference
+docker run --rm bitnet-inference models/bitnet-2b.tmac2.bin -n 32
+
+# Or with custom parameters
+docker run --rm bitnet-inference models/bitnet-2b.tmac2.bin -n 64 -t 0.8 -p 0.9
+```
+
+### BitNet Benchmark Results
+
+| Model | Size | Tokens/sec | Notes |
+|-------|------|------------|-------|
+| BitNet b1.58-2B | 657 MB | 0.36 tok/s | Unoptimized, CPU-only |
+
+**Note:** These results are from initial implementation. Performance can be improved with:
+- SIMD-optimized ternary matmul
+- Better memory layout
+- Parallelization tuning
+
 ## Future Work
 
 - [ ] GPTQ-style calibration for better post-training quantization
@@ -185,6 +242,8 @@ T-MAC enables running **7x larger models** in the same memory footprint.
 - [ ] SIMD-optimized LUT operations (TBL/PSHUF instructions)
 - [ ] Training scripts for ternary models
 - [ ] Integration with llama2.c model format
+- [x] BitNet b1.58 model support
+- [ ] Optimized BitNet inference (target: 5+ tok/s)
 
 ## References
 

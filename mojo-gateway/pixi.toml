@@ -2,7 +2,7 @@
 authors = ["umerkhan95 <96595386+umerkhan95@users.noreply.github.com>"]
 channels = ["conda-forge", "https://conda.modular.com/max"]
 name = "mojo-gateway"
-platforms = ["osx-64"]
+platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
@@ -11,3 +11,4 @@ build = "mojo build src/main.mojo -o bin/gateway"
 
 [dependencies]
 max = ">=25.1"
+mojo = ">=0.25.7.0,<0.26"
