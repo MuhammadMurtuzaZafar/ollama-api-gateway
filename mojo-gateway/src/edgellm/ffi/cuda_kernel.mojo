@@ -299,3 +299,436 @@ fn print_cuda_info() raises:
     print("  Memory:", info.total_memory_gb, "GB")
     print("  SM Count:", info.sm_count)
     print("  Compute:", info.compute_major, ".", info.compute_minor)
+
+
+# ============================================================================
+# Phase 1: Persistent GPU Memory API
+# ============================================================================
+
+fn cuda_load_weights(
+    weights: UnsafePointer[Int8],
+    scales: UnsafePointer[Float32],
+    weight_bytes: Int,
+    num_rows: Int,
+) raises -> Bool:
+    """
+    Load model weights to GPU memory (one-time operation).
+
+    Weights remain on GPU until cuda_unload_weights() or cuda_cleanup().
+    Subsequent calls to tmac_matmul_cuda_persistent() skip weight transfer.
+
+    Args:
+        weights: Packed ternary weights (host memory)
+        scales: Per-row scaling factors (host memory)
+        weight_bytes: Size of weights in bytes
+        num_rows: Number of rows (for scales)
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not cuda_available():
+        return False
+
+    var kernel = get_cuda_kernel()
+    var result = kernel.call["cuda_load_weights", Int](
+        weights, scales, weight_bytes, num_rows
+    )
+    return result == 0
+
+
+fn cuda_unload_weights() raises:
+    """Unload weights from GPU memory."""
+    if _cuda_loaded:
+        var kernel = get_cuda_kernel()
+        kernel.call["cuda_unload_weights", NoneType]()
+
+
+fn cuda_weights_loaded() raises -> Bool:
+    """Check if weights are loaded on GPU."""
+    if not _cuda_loaded:
+        return False
+    var kernel = get_cuda_kernel()
+    return kernel.call["cuda_weights_loaded", Int]() == 1
+
+
+fn tmac_matmul_cuda_persistent(
+    output: UnsafePointer[Float32],
+    activations: UnsafePointer[Float32],
+    M: Int,
+    N: Int,
+    K: Int,
+) raises -> Bool:
+    """
+    T-MAC MatMul with persistent weights (weights already on GPU).
+
+    Args:
+        output: Output buffer [M * N]
+        activations: Input activations [K * N]
+        M: Number of output rows
+        N: Number of output columns (batch size)
+        K: Inner dimension
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not cuda_available():
+        return False
+
+    var kernel = get_cuda_kernel()
+    var result = kernel.call["tmac_matmul_cuda_persistent", Int](
+        activations, output, M, N, K
+    )
+    return result == 0
+
+
+fn cuda_load_norm_weights(
+    norm_weights: UnsafePointer[Float32],
+    size: Int,
+) raises -> Bool:
+    """
+    Load normalization weights to GPU (one-time operation).
+
+    Args:
+        norm_weights: Normalization weights (host memory)
+        size: Weight vector size
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not cuda_available():
+        return False
+
+    var kernel = get_cuda_kernel()
+    var result = kernel.call["cuda_load_norm_weights", Int](
+        norm_weights, size
+    )
+    return result == 0
+
+
+fn rmsnorm_cuda_persistent(
+    output: UnsafePointer[Float32],
+    input: UnsafePointer[Float32],
+    batch_size: Int,
+    size: Int,
+    eps: Float32 = 1e-6,
+) raises -> Bool:
+    """
+    RMSNorm using pre-loaded weights (CUDA).
+
+    Args:
+        output: Output buffer (host memory)
+        input: Input buffer (host memory)
+        batch_size: Number of batches
+        size: Vector size per batch
+        eps: Epsilon for numerical stability
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not cuda_available():
+        return False
+
+    var kernel = get_cuda_kernel()
+    var result = kernel.call["rmsnorm_cuda_persistent", Int](
+        output, input, batch_size, size, eps
+    )
+    return result == 0
+
+
+# ============================================================================
+# Phase 2.1: Optimized Kernels (No Atomics, True Fusion)
+# ============================================================================
+
+fn cuda_init_streams() raises -> Bool:
+    """Initialize CUDA streams for async operations."""
+    if not cuda_available():
+        return False
+    var kernel = get_cuda_kernel()
+    return kernel.call["cuda_init_streams", Int]() == 0
+
+
+fn cuda_cleanup_streams() raises:
+    """Cleanup CUDA streams."""
+    if _cuda_loaded:
+        var kernel = get_cuda_kernel()
+        kernel.call["cuda_cleanup_streams", NoneType]()
+
+
+fn cuda_alloc_pinned(max_activations: Int, max_output: Int) raises -> Bool:
+    """Allocate pinned (page-locked) host memory for faster transfers."""
+    if not cuda_available():
+        return False
+    var kernel = get_cuda_kernel()
+    return kernel.call["cuda_alloc_pinned", Int](max_activations, max_output) == 0
+
+
+fn cuda_free_pinned() raises:
+    """Free pinned host memory."""
+    if _cuda_loaded:
+        var kernel = get_cuda_kernel()
+        kernel.call["cuda_free_pinned", NoneType]()
+
+
+fn tmac_matmul_cuda_v3(
+    output: UnsafePointer[Float32],
+    activations: UnsafePointer[Float32],
+    M: Int,
+    N: Int,
+    K: Int,
+) raises -> Bool:
+    """
+    Optimized T-MAC MatMul with warp-private accumulation (Phase 2.1).
+
+    No atomicAdd, warp-level shuffle reduction.
+
+    Args:
+        output: Output buffer [M * N]
+        activations: Input activations [K * N]
+        M: Number of output rows
+        N: Number of output columns (batch size)
+        K: Inner dimension
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not cuda_available():
+        return False
+
+    var kernel = get_cuda_kernel()
+    var result = kernel.call["tmac_matmul_cuda_v3", Int](
+        activations, output, M, N, K
+    )
+    return result == 0
+
+
+fn streaming_fused_rmsnorm_matmul_cuda(
+    output: UnsafePointer[Float32],
+    input: UnsafePointer[Float32],
+    M: Int,
+    K: Int,
+    eps: Float32 = 1e-6,
+) raises -> Bool:
+    """
+    Streaming Fused RMSNorm + T-MAC MatMul (Phase 2.1).
+
+    True fusion: normalizes on-the-fly without intermediate storage.
+    Best for batch_size=1 (single token generation).
+
+    Args:
+        output: Output buffer [M]
+        input: Input activations [K]
+        M: Output dimension
+        K: Hidden size / input dimension
+        eps: Epsilon for RMSNorm numerical stability
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not cuda_available():
+        return False
+
+    var kernel = get_cuda_kernel()
+    var result = kernel.call["streaming_fused_rmsnorm_matmul_cuda", Int](
+        input, output, M, K, eps
+    )
+    return result == 0
+
+
+fn tmac_matmul_cuda_adaptive(
+    output: UnsafePointer[Float32],
+    activations: UnsafePointer[Float32],
+    M: Int,
+    N: Int,
+    K: Int,
+) raises -> Bool:
+    """
+    Adaptive T-MAC MatMul dispatch (Phase 2.1).
+
+    Automatically chooses optimal kernel based on tensor size.
+
+    Args:
+        output: Output buffer [M * N]
+        activations: Input activations [K * N]
+        M: Number of output rows
+        N: Number of output columns (batch size)
+        K: Inner dimension
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not cuda_available():
+        return False
+
+    var kernel = get_cuda_kernel()
+    var result = kernel.call["tmac_matmul_cuda_adaptive", Int](
+        activations, output, M, N, K
+    )
+    return result == 0
+
+
+fn fused_rmsnorm_matmul_cuda_adaptive(
+    output: UnsafePointer[Float32],
+    input: UnsafePointer[Float32],
+    M: Int,
+    N: Int,
+    K: Int,
+    eps: Float32 = 1e-6,
+) raises -> Bool:
+    """
+    Adaptive Fused RMSNorm + MatMul dispatch (Phase 2.1).
+
+    Automatically chooses optimal kernel based on tensor size and batch.
+
+    Args:
+        output: Output buffer [M * N]
+        input: Input activations [K * N]
+        M: Number of output rows
+        N: Number of output columns (batch size)
+        K: Hidden size / input dimension
+        eps: Epsilon for RMSNorm numerical stability
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not cuda_available():
+        return False
+
+    var kernel = get_cuda_kernel()
+    var result = kernel.call["fused_rmsnorm_matmul_cuda_adaptive", Int](
+        input, output, M, N, K, eps
+    )
+    return result == 0
+
+
+# ============================================================================
+# Phase 3: INT8 Tensor Core API
+# ============================================================================
+
+fn cuda_has_int8_tensorcore() raises -> Bool:
+    """Check if INT8 Tensor Cores are available (requires sm_75+)."""
+    if not cuda_available():
+        return False
+    var kernel = get_cuda_kernel()
+    return kernel.call["cuda_has_int8_tensorcore", Int]() == 1
+
+
+fn cuda_get_compute_capability() raises -> Int:
+    """Get compute capability (e.g., 75 for sm_75)."""
+    if not cuda_available():
+        return 0
+    var kernel = get_cuda_kernel()
+    return kernel.call["cuda_get_compute_capability", Int]()
+
+
+fn cuda_load_weights_int8_tc(
+    packed_weights: UnsafePointer[Int8],
+    scales: UnsafePointer[Float32],
+    weight_bytes: Int,
+    num_rows: Int,
+    K: Int,
+) raises -> Bool:
+    """
+    Load weights in INT8 Tensor Core format.
+
+    Expands 2-bit packed ternary weights to full INT8 format.
+    Memory usage: 4x the packed weight size.
+
+    Args:
+        packed_weights: Packed ternary weights [M * K/4]
+        scales: Per-row scaling factors [M]
+        weight_bytes: Size of packed weights in bytes
+        num_rows: M dimension
+        K: K dimension
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not cuda_available():
+        return False
+
+    var kernel = get_cuda_kernel()
+    var result = kernel.call["cuda_load_weights_int8_tc", Int](
+        packed_weights, scales, weight_bytes, num_rows, K
+    )
+    return result == 0
+
+
+fn cuda_unload_weights_int8_tc() raises:
+    """Unload INT8 Tensor Core weights from GPU memory."""
+    if _cuda_loaded:
+        var kernel = get_cuda_kernel()
+        kernel.call["cuda_unload_weights_int8_tc", NoneType]()
+
+
+fn cuda_weights_int8_tc_loaded() raises -> Bool:
+    """Check if INT8 TC weights are loaded."""
+    if not _cuda_loaded:
+        return False
+    var kernel = get_cuda_kernel()
+    return kernel.call["cuda_weights_int8_tc_loaded", Int]() == 1
+
+
+fn tmac_matmul_cuda_int8_tc(
+    output: UnsafePointer[Float32],
+    activations: UnsafePointer[Float32],
+    M: Int,
+    N: Int,
+    K: Int,
+) raises -> Bool:
+    """
+    INT8 Tensor Core Matrix Multiplication.
+
+    Requires: cuda_load_weights_int8_tc() called first.
+
+    Args:
+        output: FP32 output buffer [M * N]
+        activations: FP32 input activations [K * N]
+        M: Number of output rows
+        N: Batch size
+        K: Inner dimension
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not cuda_available():
+        return False
+
+    var kernel = get_cuda_kernel()
+    var result = kernel.call["tmac_matmul_cuda_int8_tc", Int](
+        activations, output, M, N, K
+    )
+    return result == 0
+
+
+fn fused_rmsnorm_matmul_cuda_adaptive_v2(
+    output: UnsafePointer[Float32],
+    input: UnsafePointer[Float32],
+    M: Int,
+    N: Int,
+    K: Int,
+    eps: Float32 = 1e-6,
+) raises -> Bool:
+    """
+    Adaptive dispatch v2 with INT8 Tensor Core support.
+
+    Automatically selects optimal kernel based on hardware and tensor size.
+
+    Args:
+        output: Output buffer [M * N]
+        input: Input activations [K * N]
+        M: Number of output rows
+        N: Batch size
+        K: Hidden size / input dimension
+        eps: Epsilon for RMSNorm numerical stability
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not cuda_available():
+        return False
+
+    var kernel = get_cuda_kernel()
+    var result = kernel.call["fused_rmsnorm_matmul_cuda_adaptive_v2", Int](
+        input, output, M, N, K, eps
+    )
+    return result == 0

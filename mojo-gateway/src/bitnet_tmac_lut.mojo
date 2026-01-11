@@ -5,6 +5,7 @@ Key optimizations over bitnet_simple.mojo:
 1. Precomputed lookup tables for activation groups (no multiplications in matmul)
 2. Per-row scales applied after LUT accumulation
 3. Parallel row computation
+4. CUDA acceleration (when available) - eliminates CPU LUT rebuilding overhead
 
 Based on T-MAC paper: https://arxiv.org/abs/2407.00088
 """
@@ -16,6 +17,25 @@ from sys.info import num_performance_cores
 import math
 import random
 import time
+
+# CUDA kernel imports (optional - gracefully degrades to CPU if unavailable)
+var _cuda_available: Bool = False
+var _cuda_initialized: Bool = False
+
+fn try_init_cuda() -> Bool:
+    """Try to initialize CUDA. Returns True if successful."""
+    try:
+        from src.edgellm.ffi.cuda_kernel import cuda_available, cuda_init, print_cuda_info
+        if cuda_available():
+            # Initialize with reasonable buffer sizes for SmolLM-135M
+            # max_weights: ~53MB, max_activations: 4096, max_output: 50000
+            var success = cuda_init(60 * 1024 * 1024, 4096, 50000)
+            if success:
+                print_cuda_info()
+                return True
+    except:
+        pass
+    return False
 
 
 # =============================================================================
@@ -686,6 +706,228 @@ fn forward(
 
 
 # =============================================================================
+# CUDA-Accelerated Forward Pass
+# =============================================================================
+
+fn tmac_matmul_cuda_call(
+    output: UnsafePointer[Float32],
+    weights_ptr: UnsafePointer[UInt8],
+    activations: UnsafePointer[Float32],
+    scales_ptr: UnsafePointer[Float32],
+    w_offset: Int,
+    s_offset: Int,
+    M: Int,
+    N: Int,
+    K: Int,
+) raises -> Bool:
+    """Call CUDA T-MAC matmul with offset-based weights."""
+    from src.edgellm.ffi.cuda_kernel import tmac_matmul_cuda
+
+    # Get pointers with offsets
+    var bytes_per_row = (K + 3) // 4
+    var w_ptr = (weights_ptr + w_offset).bitcast[Int8]()
+    var s_ptr = scales_ptr + s_offset
+
+    return tmac_matmul_cuda(output, w_ptr, activations, s_ptr, M, N, K)
+
+
+fn rmsnorm_cuda_call(
+    output: UnsafePointer[Float32],
+    input: UnsafePointer[Float32],
+    weight: UnsafePointer[Float32],
+    weight_offset: Int,
+    size: Int,
+) raises -> Bool:
+    """Call CUDA RMSNorm."""
+    from src.edgellm.ffi.cuda_kernel import rmsnorm_cuda
+
+    var w_ptr = weight + weight_offset
+    return rmsnorm_cuda(output, input, w_ptr, 1, size, 1e-6)
+
+
+fn softmax_cuda_call(
+    data: UnsafePointer[Float32],
+    offset: Int,
+    size: Int,
+) raises -> Bool:
+    """Call CUDA Softmax in-place."""
+    from src.edgellm.ffi.cuda_kernel import softmax_cuda
+
+    var ptr = data + offset
+    return softmax_cuda(ptr, ptr, 1, size)
+
+
+fn forward_cuda(
+    mut state: RunState,
+    weights: FlatWeights,
+    config: Config,
+    token: Int,
+    pos: Int
+) raises:
+    """
+    CUDA-accelerated forward pass.
+
+    Key difference from CPU forward:
+    - No LUT rebuilding (150x per token) - CUDA kernel handles this internally
+    - GPU-parallel matrix operations
+    - Fused RMSNorm where possible
+    """
+    var dim = config.dim
+    var hidden_dim = config.hidden_dim
+    var n_heads = config.n_heads
+    var n_kv_heads = config.n_kv_heads
+    var head_size = config.head_size
+    var kv_dim = config.kv_dim
+    var kv_mul = config.kv_mul
+
+    # Get raw pointers for CUDA calls
+    var ternary_ptr = weights.ternary_data.unsafe_ptr()
+    var scales_ptr = weights.scales.unsafe_ptr()
+    var float_ptr = weights.float_data.unsafe_ptr()
+
+    var x_ptr = state.x.unsafe_ptr()
+    var xb_ptr = state.xb.unsafe_ptr()
+    var xb2_ptr = state.xb2.unsafe_ptr()
+    var hb_ptr = state.hb.unsafe_ptr()
+    var hb2_ptr = state.hb2.unsafe_ptr()
+    var q_ptr = state.q.unsafe_ptr()
+    var k_ptr = state.k.unsafe_ptr()
+    var v_ptr = state.v.unsafe_ptr()
+    var att_ptr = state.att.unsafe_ptr()
+    var logits_ptr = state.logits.unsafe_ptr()
+
+    # Get token embedding (same as CPU - small operation)
+    var embed_bytes_per_row = (dim + 3) // 4
+    var embed_w_offset = weights.embed_offset + token * embed_bytes_per_row
+    var embed_s_offset = weights.embed_scale_offset + token
+    var embed_scale = weights.scales[embed_s_offset]
+
+    for i in range(dim):
+        var byte_idx = i // 4
+        var bit_pos = (i % 4) * 2
+        var byte_val = Int(weights.ternary_data[embed_w_offset + byte_idx])
+        var bits = (byte_val >> bit_pos) & 0x03
+        var w: Float32
+        if bits == 0:
+            w = 0.0
+        elif bits == 1:
+            w = 1.0
+        else:
+            w = -1.0
+        state.x[i] = w * embed_scale
+
+    # Process each layer
+    for layer in range(config.n_layers):
+        # Input normalization (CUDA)
+        _ = rmsnorm_cuda_call(xb_ptr, x_ptr, float_ptr,
+                              weights.layer_input_norm[layer], dim)
+
+        # QKV projections using CUDA T-MAC (NO LUT REBUILD!)
+        _ = tmac_matmul_cuda_call(q_ptr, ternary_ptr, xb_ptr, scales_ptr,
+                                   weights.layer_q_weight[layer], weights.layer_q_scale[layer],
+                                   dim, 1, dim)
+        _ = tmac_matmul_cuda_call(k_ptr, ternary_ptr, xb_ptr, scales_ptr,
+                                   weights.layer_k_weight[layer], weights.layer_k_scale[layer],
+                                   kv_dim, 1, dim)
+        _ = tmac_matmul_cuda_call(v_ptr, ternary_ptr, xb_ptr, scales_ptr,
+                                   weights.layer_v_weight[layer], weights.layer_v_scale[layer],
+                                   kv_dim, 1, dim)
+
+        # RoPE (CPU - trigonometric, hard to parallelize)
+        rope(state.q, state.k, 0, 0, head_size, n_heads, n_kv_heads, pos, config.rope_theta)
+
+        # Cache KV (CPU - memory copy)
+        var cache_offset = layer * config.seq_len * kv_dim + pos * kv_dim
+        for i in range(kv_dim):
+            state.key_cache[cache_offset + i] = state.k[i]
+            state.value_cache[cache_offset + i] = state.v[i]
+
+        # Multi-head attention with GQA (CPU for now - attention is O(seq_len))
+        # TODO: Move to CUDA FlashAttention for longer sequences
+        @parameter
+        fn compute_head(h: Int):
+            var q_head_offset = h * head_size
+            var att_offset = h * config.seq_len
+            var kv_head = h // kv_mul
+
+            for t in range(pos + 1):
+                var k_cache_offset = layer * config.seq_len * kv_dim + t * kv_dim + kv_head * head_size
+                var score: Float32 = 0.0
+                for i in range(head_size):
+                    score += state.q[q_head_offset + i] * state.key_cache[k_cache_offset + i]
+                state.att[att_offset + t] = score / math.sqrt(Float32(head_size))
+
+            softmax(state.att, att_offset, pos + 1)
+
+            for i in range(head_size):
+                var sum_val: Float32 = 0.0
+                for t in range(pos + 1):
+                    var v_cache_offset = layer * config.seq_len * kv_dim + t * kv_dim + kv_head * head_size
+                    sum_val += state.att[att_offset + t] * state.value_cache[v_cache_offset + i]
+                state.xb[q_head_offset + i] = sum_val
+
+        parallelize[compute_head](n_heads)
+
+        # Attention sub-norm (CUDA)
+        _ = rmsnorm_cuda_call(xb2_ptr, xb_ptr, float_ptr,
+                              weights.layer_attn_sub_norm[layer], dim)
+
+        # Output projection using CUDA T-MAC (NO LUT REBUILD!)
+        _ = tmac_matmul_cuda_call(xb_ptr, ternary_ptr, xb2_ptr, scales_ptr,
+                                   weights.layer_o_weight[layer], weights.layer_o_scale[layer],
+                                   dim, 1, dim)
+
+        # Residual connection
+        for i in range(dim):
+            state.x[i] += state.xb[i]
+
+        # Post-attention norm (CUDA)
+        _ = rmsnorm_cuda_call(xb_ptr, x_ptr, float_ptr,
+                              weights.layer_post_norm[layer], dim)
+
+        # FFN: gate and up projections using CUDA T-MAC (NO LUT REBUILD!)
+        _ = tmac_matmul_cuda_call(hb_ptr, ternary_ptr, xb_ptr, scales_ptr,
+                                   weights.layer_gate_weight[layer], weights.layer_gate_scale[layer],
+                                   hidden_dim, 1, dim)
+        _ = tmac_matmul_cuda_call(hb2_ptr, ternary_ptr, xb_ptr, scales_ptr,
+                                   weights.layer_up_weight[layer], weights.layer_up_scale[layer],
+                                   hidden_dim, 1, dim)
+
+        # ReLU squared and multiply (CPU - element-wise)
+        for i in range(hidden_dim):
+            var gate_val = state.hb[i]
+            if gate_val > 0:
+                gate_val = gate_val * gate_val
+            else:
+                gate_val = 0.0
+            state.hb[i] = gate_val * state.hb2[i]
+
+        # FFN sub-norm (CUDA)
+        _ = rmsnorm_cuda_call(hb2_ptr, hb_ptr, float_ptr,
+                              weights.layer_ffn_sub_norm[layer], hidden_dim)
+
+        # Down projection using CUDA T-MAC (NO LUT REBUILD!)
+        _ = tmac_matmul_cuda_call(xb_ptr, ternary_ptr, hb2_ptr, scales_ptr,
+                                   weights.layer_down_weight[layer], weights.layer_down_scale[layer],
+                                   dim, 1, hidden_dim)
+
+        # Residual connection
+        for i in range(dim):
+            state.x[i] += state.xb[i]
+
+    # Final norm (CUDA)
+    _ = rmsnorm_cuda_call(xb_ptr, x_ptr, float_ptr,
+                          weights.final_norm_offset, dim)
+    for i in range(dim):
+        state.x[i] = state.xb[i]
+
+    # LM head using CUDA T-MAC (NO LUT REBUILD!)
+    _ = tmac_matmul_cuda_call(logits_ptr, ternary_ptr, x_ptr, scales_ptr,
+                               weights.lm_head_offset, weights.lm_head_scale_offset,
+                               config.vocab_size, 1, dim)
+
+
+# =============================================================================
 # Sampling
 # =============================================================================
 
@@ -757,13 +999,14 @@ fn sample_topp(mut logits: List[Float32], size: Int, topp: Float32, temp: Float3
 fn main() raises:
     var args = argv()
     if len(args) < 2:
-        print("Usage: bitnet_tmac_lut <model.tmac2.bin> [-n tokens] [-t temp] [-p topp]")
+        print("Usage: bitnet_tmac_lut <model.tmac2.bin> [-n tokens] [-t temp] [-p topp] [--cpu]")
         return
 
     var model_path = String(args[1])
     var num_tokens = 32
     var temperature: Float32 = 0.8
     var topp: Float32 = 0.9
+    var force_cpu = False
 
     var i = 2
     while i < len(args):
@@ -776,6 +1019,9 @@ fn main() raises:
         elif String(args[i]) == "-p" and i + 1 < len(args):
             topp = Float32(atof(args[i + 1]))
             i += 2
+        elif String(args[i]) == "--cpu":
+            force_cpu = True
+            i += 1
         else:
             i += 1
 
@@ -793,12 +1039,29 @@ fn main() raises:
     var weights = load_weights(model_path, config)
     var state = RunState(config)
 
+    # Try to initialize CUDA
+    var use_cuda = False
+    if not force_cpu:
+        use_cuda = try_init_cuda()
+        if use_cuda:
+            print()
+            print("CUDA acceleration ENABLED")
+            print("  - No LUT rebuilding overhead (was 150x per token)")
+            print("  - GPU-parallel matrix operations")
+        else:
+            print()
+            print("CUDA not available, using CPU backend")
+    else:
+        print()
+        print("CPU mode forced (--cpu flag)")
+
     print()
     print("Model loaded successfully!")
     print("Ternary data:", len(weights.ternary_data) // 1024 // 1024, "MB")
     print()
     print("Generating", num_tokens, "tokens...")
     print("Temperature:", temperature, "Top-p:", topp)
+    print("Backend:", "CUDA" if use_cuda else "CPU (LUT)")
     print("-" * 50)
 
     # Use BOS token (typically 0 or 1, clamped to vocab size for safety)
@@ -807,7 +1070,10 @@ fn main() raises:
     var tokens_generated = 0
 
     for pos in range(num_tokens):
-        forward(state, weights, config, token, pos)
+        if use_cuda:
+            forward_cuda(state, weights, config, token, pos)
+        else:
+            forward(state, weights, config, token, pos)
 
         if temperature == 0.0:
             token = sample_argmax(state.logits, config.vocab_size)
@@ -829,5 +1095,14 @@ fn main() raises:
     print()
     print("Generated", tokens_generated, "tokens in", elapsed_s, "seconds")
     print("Speed:", tok_per_sec, "tok/s")
+    print("Backend:", "CUDA" if use_cuda else "CPU (LUT)")
     print()
     print("Note: Output shows token IDs. Use a tokenizer to decode to text.")
+
+    # Cleanup CUDA resources
+    if use_cuda:
+        try:
+            from src.edgellm.ffi.cuda_kernel import cuda_cleanup
+            cuda_cleanup()
+        except:
+            pass
