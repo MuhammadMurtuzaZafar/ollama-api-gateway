@@ -1,139 +1,228 @@
-# Mojo Gateway - Skills & Use Cases
+# EdgeLLM - Skills & Use Cases
 
 > Skills are reusable task patterns for Claude Code. Use `/skill-name` to invoke.
 
 ---
 
-## T-MAC Inference Skills
+## Quick Start Skills
 
-### /quantize-tmac
-Convert a LLaMA model to T-MAC ternary format.
+### /setup-dev
+Set up development environment for EdgeLLM.
 
 **Steps:**
-1. Load model weights from .bin file
-2. Quantize to ternary {-1, 0, +1} with per-row scales
-3. Pack 4 weights per byte (2 bits each)
-4. Save in T-MAC v2 format (.tmac2.bin)
-
-**Usage:**
 ```bash
-python scripts/quantize_tmac_v2.py model.bin output.tmac2.bin
-```
+# Clone and enter directory
+cd mojo-gateway
 
-**Files:** `scripts/quantize_tmac_v2.py`
+# For Intel Mac or Linux (Docker required)
+docker compose -f docker-compose.mojo.yml up --build
+
+# For Apple Silicon Mac (native)
+curl -fsSL https://pixi.sh/install.sh | sh
+pixi install
+```
 
 ---
 
-### /build-tmac
-Build T-MAC inference engine.
-
-**Steps:**
-1. Ensure pixi environment is set up
-2. Build with optimizations
-3. Test with sample prompt
+### /build-edgellm
+Build EdgeLLM inference engine.
 
 **Commands:**
 ```bash
-pixi install
-pixi run mojo build -O3 src/llama2_tmac_v2.mojo -o bin/llama2_tmac
-./bin/llama2_tmac model.tmac2.bin -z tokenizer.bin -n 32
+# Build C kernels first
+make -C src/kernels clean all
+
+# Build Mojo inference (in Docker or native)
+pixi run mojo build -O3 src/bitnet_tmac_lut.mojo -o bin/edgellm
+
+# Verify build
+./bin/edgellm --help
 ```
 
-**Files:** `src/llama2_tmac_v2.mojo`
+**Files:** `src/bitnet_tmac_lut.mojo`, `src/kernels/tmac_kernel.c`
 
 ---
 
 ### /run-inference
-Run inference with any implementation.
-
-**Variants:**
-- `llama2_tmac_v2` - T-MAC scaled ternary (recommended)
-- `llama2_parallel` - Float32 SIMD baseline
-- `llama2_int4` - Int4 quantized
+Run EdgeLLM inference.
 
 **Usage:**
 ```bash
-./bin/{variant} model.bin -z tokenizer.bin -n 128 -t 0.8 -p 0.9
+./bin/edgellm models/smollm-135m.tmac2.bin -n 32 -t 0.8 -p 0.9
 ```
 
 **Options:**
-- `-z` : Tokenizer path
-- `-n` : Token count
-- `-t` : Temperature (0.0-1.0)
-- `-p` : Top-p threshold
+- `-n` : Number of tokens to generate
+- `-t` : Temperature (0.0 = deterministic)
+- `-p` : Top-p threshold for sampling
 
 ---
 
-## BitNet Skills
+## Quantization Skills
 
-### /convert-bitnet
-Convert Microsoft BitNet model to T-MAC format.
-
-**Prerequisites:**
-- Download model: `huggingface-cli download microsoft/bitnet-b1.58-2B-4T`
+### /quantize-bitnet
+Convert HuggingFace model to BitNet 1.58-bit format.
 
 **Steps:**
-1. Load safetensors model
-2. Unpack base-3 ternary weights
-3. Repack to T-MAC 2-bit format
-4. Save with per-row scales
+```bash
+python scripts/quantize/quantize_bitnet.py \
+    --model HuggingFaceTB/SmolLM-135M \
+    --output models/smollm-135m.tmac2.bin
+```
+
+**Result:**
+- FP16 → 1.58-bit (4.8x compression)
+- 256 MB → 53 MB for SmolLM-135M
+
+**Files:** `scripts/quantize/quantize_bitnet.py`
+
+---
+
+### /verify-model
+Verify quantized model integrity.
 
 **Usage:**
 ```bash
-python scripts/convert_bitnet_to_tmac.py output.tmac2.bin models/bitnet-2b/
+python scripts/quantize/verify_bitnet.py models/smollm-135m.tmac2.bin
 ```
 
-**Files:** `scripts/convert_bitnet_to_tmac.py`
-
-**Key Conversion:**
-```python
-# BitNet base-3: byte = w0 + 3*w1 + 9*w2 + 27*w3
-w0 = byte % 3
-w1 = (byte // 3) % 3
-# ... maps {0,1,2} -> {-1,0,+1}
-
-# T-MAC 2-bit: 00=0, 01=+1, 11=-1
-```
+**Checks:**
+- Magic bytes (TMAC)
+- Config values
+- Weight dimensions
+- Scale distributions
 
 ---
 
-### /build-bitnet
-Build BitNet inference engine using Docker.
+## Benchmark Skills
 
-**Why Docker:** Mojo only supports Linux-64 and macOS-ARM64.
+### /benchmark-compare
+Run EdgeLLM vs Ollama comparison benchmark.
 
-**Steps:**
+**Prerequisites:**
 ```bash
-docker build -f Dockerfile.bitnet -t bitnet-inference .
-docker run --rm bitnet-inference models/bitnet-2b.tmac2.bin -n 32
+# Ensure Ollama is running
+ollama serve &
+ollama pull smollm:135m
 ```
 
-**Files:** `Dockerfile.bitnet`, `src/bitnet_simple.mojo`
+**Run benchmark:**
+```bash
+python benchmarks/edgellm_benchmark.py --compare --runs 100 -o results.json
+```
+
+**Output:**
+- JSON file with detailed metrics
+- Throughput (tok/s)
+- Latency percentiles (P50, P95, P99)
+- Jitter (standard deviation)
+
+**Files:** `benchmarks/edgellm_benchmark.py`
 
 ---
 
-### /bitnet-architecture
-Understanding BitNet b1.58 architecture differences.
+### /benchmark-edgellm
+Benchmark EdgeLLM only.
 
-**Key Differences from LLaMA:**
-
-| Component | LLaMA | BitNet |
-|-----------|-------|--------|
-| Activation | SiLU | ReLU² |
-| Norms | Pre-norm | + Sub-norms |
-| RoPE theta | 10,000 | 500,000 |
-| Attention | MHA | GQA (20h/5kv) |
-
-**Sub-norms:**
-```mojo
-# After attention
-rmsnorm(xb, attn_output, attn_sub_norm)  # BitNet only
-output_projection(result, xb)
-
-# After FFN gate*up
-rmsnorm(hb, ffn_intermediate, ffn_sub_norm)  # BitNet only
-down_projection(result, hb)
+**Usage:**
+```bash
+python benchmarks/edgellm_benchmark.py \
+    --backend edgellm \
+    --model models/smollm-135m.tmac2.bin \
+    --runs 100 \
+    -o edgellm_results.json
 ```
+
+---
+
+### /benchmark-ollama
+Benchmark Ollama only.
+
+**Usage:**
+```bash
+python benchmarks/edgellm_benchmark.py \
+    --backend ollama \
+    --model smollm:135m \
+    --runs 100 \
+    -o ollama_results.json
+```
+
+---
+
+## Docker Skills
+
+### /docker-dev
+Start Docker development environment.
+
+**Usage:**
+```bash
+docker compose -f docker-compose.mojo.yml up --build
+```
+
+**Includes:**
+- Mojo runtime via pixi
+- C kernel compilation
+- Python benchmarking tools
+
+**Files:** `Dockerfile.mojo`, `docker-compose.mojo.yml`
+
+---
+
+### /docker-benchmark
+Build and run benchmark Docker image.
+
+**Usage:**
+```bash
+# Build
+docker build -f Dockerfile.benchmark -t edgellm-benchmark .
+
+# Run
+docker run --rm -v $(pwd)/results:/workspace/results edgellm-benchmark
+```
+
+**Files:** `Dockerfile.benchmark`
+
+---
+
+## FFI Skills
+
+### /test-ffi
+Test C kernel FFI integration.
+
+**Usage:**
+```bash
+# In Docker environment
+pixi run mojo src/edgellm/ffi/test_ffi.mojo
+```
+
+**Tests:**
+- CPU feature detection (AVX2, AVX512, NEON)
+- RMSNorm performance
+- Softmax performance
+- LUT building
+
+**Files:** `src/edgellm/ffi/test_ffi.mojo`
+
+---
+
+### /build-kernel
+Build C kernels for current platform.
+
+**x86 (AVX2):**
+```bash
+clang -O3 -mavx2 -shared -fPIC \
+    -o lib/libtmac_kernel.so \
+    src/kernels/tmac_kernel.c
+```
+
+**ARM (NEON):**
+```bash
+clang -O3 -shared -fPIC \
+    -o lib/libtmac_kernel.so \
+    src/kernels/tmac_kernel.c
+```
+
+**Files:** `src/kernels/tmac_kernel.c`, `src/kernels/tmac_kernel.h`
 
 ---
 
@@ -159,7 +248,28 @@ struct MyStruct(Movable):
         self.size = other.size
 ```
 
-**Note:** Use `deinit` not `owned` (deprecated).
+---
+
+### /mojo-ffi-call
+Make FFI call to C function.
+
+**Pattern:**
+```mojo
+from sys.ffi import OwnedDLHandle
+
+fn main() raises:
+    var handle = OwnedDLHandle("lib/libtmac_kernel.so")
+
+    # Simple call
+    var result = handle.call["get_cpu_features", Int32]()
+
+    # With pointers
+    var data = List[Float32]()
+    var ptr = data.unsafe_ptr()
+    handle.call["rmsnorm_avx2", NoneType](out_ptr, ptr, weight_ptr, size, eps)
+```
+
+**Note:** Use `OwnedDLHandle` not `DLHandle` (deprecated).
 
 ---
 
@@ -184,86 +294,31 @@ for i in range(dim):
 
 ---
 
-### /add-parallel
-Add parallel computation.
+## Research Skills
 
-**Template:**
-```mojo
-from algorithm import parallelize
+### /paper-roadmap
+View research paper roadmap.
 
-fn process_data(mut data: List[Float32], size: Int):
-    @parameter
-    fn compute_item(i: Int):
-        data[i] = data[i] * 2.0
+**File:** `PAPER_ROADMAP.md`
 
-    parallelize[compute_item](size)
-```
-
----
-
-## Quantization Skills
-
-### /analyze-quantization
-Analyze quantization quality.
-
-**Metrics:**
-- MSE between original and quantized
-- Percentage of zeros
-- Scale distribution
-
-**Usage:**
-```python
-# In quantization script
-original = weights.flatten()
-quantized = quantize_ternary(original)
-dequantized = dequantize(quantized, scales)
-mse = np.mean((original - dequantized) ** 2)
-print(f"MSE: {mse:.6f}")
-```
+**Key Phases:**
+1. Complete working system (Mojo inference)
+2. Rigorous benchmarking (100+ runs)
+3. Multi-platform validation (Pi 5, x86, ARM)
+4. Paper writing
+5. Artifact preparation
 
 ---
 
-### /calibration
-Add calibration data for better quantization.
+### /benchmark-report
+View current benchmark report.
 
-**Steps:**
-1. Run model on calibration dataset
-2. Collect activation statistics
-3. Optimize scales to minimize error
-4. Save calibrated model
+**File:** `BENCHMARK_REPORT.md`
 
-**Note:** Not yet implemented - future work.
-
----
-
-## Benchmark Skills
-
-### /benchmark-all
-Run comprehensive benchmarks.
-
-**Script:**
-```bash
-./scripts/benchmark_all.sh model.bin tokenizer.bin
-```
-
-**Outputs:**
-- Tokens/second for each implementation
-- Memory usage
-- Model size comparison
-
----
-
-### /profile
-Profile inference performance.
-
-**Commands:**
-```bash
-# Time inference
-time ./bin/llama2_tmac model.tmac2.bin -n 100
-
-# Memory profile (Linux)
-/usr/bin/time -v ./bin/llama2_tmac model.tmac2.bin -n 100
-```
+**Key Results:**
+- EdgeLLM: 38.4 tok/s (estimated), <10ms jitter
+- Ollama: 156.7 tok/s, 5566ms jitter
+- Model size: 53.2 MB (4.8x compression)
 
 ---
 
@@ -271,52 +326,14 @@ time ./bin/llama2_tmac model.tmac2.bin -n 100
 
 | Skill | Purpose |
 |-------|---------|
-| `/quantize-tmac` | Convert model to T-MAC format |
-| `/build-tmac` | Build T-MAC inference |
-| `/convert-bitnet` | Convert BitNet to T-MAC |
-| `/build-bitnet` | Build BitNet inference (Docker) |
-| `/run-inference` | Run any inference variant |
-| `/add-mojo-struct` | Create Mojo struct |
-| `/fix-aliasing` | Fix borrow checker errors |
-| `/benchmark-all` | Run benchmarks |
-
----
-
-## Architecture Notes
-
-### Weight Formats
-
-**T-MAC v2 (.tmac2.bin):**
-```
-Magic: "TM2\0"
-Config: [dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len]
-Weights: [flag][dims][scale+ternary per row] or [flag][float data]
-```
-
-**Ternary Encoding:**
-```
-2 bits per weight, 4 per byte:
-00 = 0, 01 = +1, 11 = -1
-```
-
-### Compression Ratios
-
-| Format | Bits/Weight | Compression |
-|--------|-------------|-------------|
-| Float32 | 32 | 1x |
-| Int4 | 4 | 8x |
-| Ternary | 2 | 16x |
-
----
-
-## Platform Requirements
-
-**Mojo/MAX Supported:**
-- Linux x86_64
-- macOS ARM64 (Apple Silicon)
-
-**NOT Supported:**
-- macOS x86_64 (Intel Mac) - use Docker
+| `/setup-dev` | Set up development environment |
+| `/build-edgellm` | Build inference engine |
+| `/run-inference` | Run model inference |
+| `/quantize-bitnet` | Convert to BitNet format |
+| `/benchmark-compare` | EdgeLLM vs Ollama benchmark |
+| `/docker-dev` | Start Docker environment |
+| `/test-ffi` | Test C kernel integration |
+| `/paper-roadmap` | View research paper plan |
 
 ---
 
@@ -325,16 +342,66 @@ Weights: [flag][dims][scale+ternary per row] or [flag][float data]
 ```
 mojo-gateway/
 ├── src/
-│   ├── llama2_tmac_v2.mojo     # T-MAC inference
-│   ├── bitnet_simple.mojo      # BitNet inference
-│   └── ...
+│   ├── bitnet_tmac_lut.mojo     # Main inference engine
+│   ├── kernels/
+│   │   ├── tmac_kernel.c        # C FFI kernel
+│   │   └── tmac_kernel.h        # Kernel header
+│   └── edgellm/
+│       └── ffi/
+│           ├── tmac_kernel.mojo # Mojo FFI wrapper
+│           └── test_ffi.mojo    # FFI tests
+├── benchmarks/
+│   └── edgellm_benchmark.py     # Automated benchmarks
 ├── scripts/
-│   ├── quantize_tmac_v2.py     # T-MAC quantizer
-│   ├── convert_bitnet_to_tmac.py  # BitNet converter
-│   └── ...
-├── models/
-│   └── bitnet-2b/              # Downloaded models
-├── docs/
-│   └── BITNET_LEARNINGS.md     # Technical learnings
-└── Dockerfile.bitnet           # Docker build
+│   └── quantize/
+│       └── quantize_bitnet.py   # Quantization tool
+├── models/                      # Model files (.tmac2.bin)
+├── Dockerfile.mojo              # Dev container
+├── Dockerfile.benchmark         # Benchmark container
+├── BENCHMARK_REPORT.md          # Results
+└── PAPER_ROADMAP.md             # Research roadmap
 ```
+
+---
+
+## Weight Format
+
+### T-MAC v2 (.tmac2.bin)
+```
+Magic: "TMAC" (4 bytes)
+Version: uint32
+Hidden size: uint32
+Num layers: uint32
+Num heads: uint32
+Vocab size: uint32
+Bits: uint32
+Group size: uint32
+[Weights...]
+```
+
+### Ternary Encoding
+```
+2 bits per weight, 4 per byte:
+00 = 0 (zero)
+01 = +1 (positive)
+11 = -1 (negative)
+```
+
+### Compression Ratio
+
+| Format | Bits/Weight | Size (135M) |
+|--------|-------------|-------------|
+| FP16 | 16 | 256.6 MB |
+| INT4 | 4 | ~80 MB |
+| BitNet | 2 | 53.2 MB |
+
+---
+
+## Platform Requirements
+
+| Platform | Mojo Native | Docker | Notes |
+|----------|-------------|--------|-------|
+| Linux x86_64 | Yes | Yes | Full support |
+| macOS ARM64 | Yes | Yes | Apple Silicon |
+| macOS x86_64 | No | Yes | Intel Mac - Docker only |
+| ARM64 (Pi) | Coming | Yes | Raspberry Pi |
