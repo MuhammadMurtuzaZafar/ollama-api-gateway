@@ -1440,14 +1440,23 @@ using namespace nvcuda::wmma;
 #define WMMA_K 16
 
 // Block configuration for Tensor Core kernel
-#define TC_BLOCK_M 64   // Output rows per block (4 WMMA tiles)
-#define TC_BLOCK_N 64   // Output cols per block (4 WMMA tiles)
+// With 256 threads = 8 warps, we have 4 warps in M x 2 warps in N
+// Each warp computes one 16x16 tile, so block covers 64x32 output
+#define TC_BLOCK_M 64   // Output rows per block (4 WMMA tiles) = TC_WARPS_M * WMMA_M
+#define TC_BLOCK_N 32   // Output cols per block (2 WMMA tiles) = TC_WARPS_N * WMMA_N
 #define TC_WARPS_M 4    // Warps in M dimension
 #define TC_WARPS_N 2    // Warps in N dimension
+
+// WMMA requires leading dimension to be multiple of 16 for proper alignment
+// Shared memory padding: round up to next multiple of 16
+#define WMMA_SMEM_PAD 32  // Padded K dimension (16 * 2 = 32, safe for WMMA_K=16)
 
 // Thresholds for INT8 TC dispatch
 #define TC_MIN_ELEMENTS 50000   // M*K threshold for TC benefit
 #define TC_MIN_COMPUTE_CAP 75   // Minimum compute capability
+
+// Helper macro to pad dimension to multiple of 16 (WMMA tile size)
+#define PAD_TO_WMMA(x) (((x) + WMMA_K - 1) / WMMA_K * WMMA_K)
 
 // Persistent INT8 TC buffers
 static int8_t* d_weights_int8_expanded = nullptr;  // [M * K] expanded weights
@@ -1586,9 +1595,11 @@ __global__ void int8_tensorcore_matmul_kernel(
     int32_t* __restrict__ output_int32,          // [M, N] row-major
     int M, int N, int K
 ) {
-    // Shared memory for tiles
-    __shared__ int8_t smem_A[TC_BLOCK_M][WMMA_K + 4];  // +4 for bank conflict avoidance
-    __shared__ int8_t smem_B[WMMA_K][TC_BLOCK_N + 4];
+    // Shared memory for tiles - WMMA requires 16-byte aligned leading dimensions
+    // Using WMMA_SMEM_PAD (32) ensures proper alignment for load_matrix_sync
+    // TC_BLOCK_N (32) is already a multiple of 16, so no extra padding needed
+    __shared__ __align__(16) int8_t smem_A[TC_BLOCK_M][WMMA_SMEM_PAD];  // 64x32, padded K
+    __shared__ __align__(16) int8_t smem_B[WMMA_SMEM_PAD][TC_BLOCK_N];  // 32x32, padded K x N
 
     // Block position
     int block_row = blockIdx.x * TC_BLOCK_M;
@@ -1648,9 +1659,10 @@ __global__ void int8_tensorcore_matmul_kernel(
         __syncthreads();
 
         // Load WMMA fragments from shared memory and compute
+        // Leading dimensions must be multiples of 16 for WMMA alignment
         if (block_row + warp_row < M && block_col + warp_col < N) {
-            load_matrix_sync(frag_A[0], &smem_A[warp_row][0], WMMA_K + 4);
-            load_matrix_sync(frag_B[0], &smem_B[0][warp_col], TC_BLOCK_N + 4);
+            load_matrix_sync(frag_A[0], &smem_A[warp_row][0], WMMA_SMEM_PAD);  // ld=32
+            load_matrix_sync(frag_B[0], &smem_B[0][warp_col], TC_BLOCK_N);     // ld=64
 
             // Tensor Core MMA operation
             mma_sync(frag_C, frag_A[0], frag_B[0], frag_C);
@@ -1658,12 +1670,33 @@ __global__ void int8_tensorcore_matmul_kernel(
         __syncthreads();
     }
 
-    // Store result
+    // Store result - use aligned shared memory buffer to avoid global memory alignment issues
+    // WMMA requires leading dimension to be multiple of 16
+    __shared__ __align__(16) int32_t smem_C[TC_BLOCK_M][TC_BLOCK_N];  // 64x32 output tile
+
     int out_row = block_row + warp_row;
     int out_col = block_col + warp_col;
 
+    // Store WMMA result to aligned shared memory first
     if (out_row < M && out_col < N) {
-        store_matrix_sync(&output_int32[out_row * N + out_col], frag_C, N, mem_row_major);
+        // TC_BLOCK_N (32) is guaranteed multiple of 16
+        store_matrix_sync(&smem_C[warp_row][warp_col], frag_C, TC_BLOCK_N, mem_row_major);
+    }
+    __syncthreads();
+
+    // Copy valid results from shared memory to global memory (unaligned N is OK here)
+    int tid = threadIdx.x;
+    int total_elements = TC_BLOCK_M * TC_BLOCK_N;
+
+    for (int i = tid; i < total_elements; i += BLOCK_SIZE) {
+        int local_row = i / TC_BLOCK_N;
+        int local_col = i % TC_BLOCK_N;
+        int global_row = block_row + local_row;
+        int global_col = block_col + local_col;
+
+        if (global_row < M && global_col < N) {
+            output_int32[global_row * N + global_col] = smem_C[local_row][local_col];
+        }
     }
 }
 
