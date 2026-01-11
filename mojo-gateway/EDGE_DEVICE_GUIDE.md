@@ -409,25 +409,40 @@ cat results/benchmark.json | python3 -m json.tool
 
 ## Roadmap
 
-### Q1 2026
+### Q1 2026 - Foundation
 - [ ] Native ARM64 build without Docker
-- [ ] Raspberry Pi 5 optimized kernel
+- [ ] Raspberry Pi 5 optimized NEON kernel
 - [ ] WebSocket streaming API
+- [ ] **CUDA kernel development begins** (Jetson Nano/Orin)
 
-### Q2 2026
-- [ ] NVIDIA Jetson Orin support
+### Q2 2026 - GPU Acceleration
+- [ ] **CUDA T-MAC kernels for NVIDIA GPUs** (80-120 tok/s target)
+- [ ] **Jetson Nano/Orin full support**
+- [ ] **Metal kernels for Apple Silicon GPUs**
 - [ ] Multimodal (vision + language)
-- [ ] Voice-to-text integration
 
-### Q3 2026
+### Q3 2026 - Apple Neural Engine
+- [ ] **Apple Neural Engine (ANE) support via Core ML**
+- [ ] **M1/M2/M3/M4 optimized inference** (150-250 tok/s target)
 - [ ] Custom fine-tuning pipeline
 - [ ] Model distillation tools
-- [ ] Edge-specific optimizations
 
-### Q4 2026
-- [ ] Hardware acceleration (NPU/DSP)
+### Q4 2026 - Edge Dominance
+- [ ] **Qualcomm Hexagon DSP support**
+- [ ] **Intel NPU support (Meteor Lake)**
 - [ ] Federated learning support
 - [ ] Enterprise edge deployment
+
+### Performance Targets with GPU
+
+| Platform | Current (CPU) | With GPU | vs Ollama |
+|----------|---------------|----------|-----------|
+| Jetson Nano | 15-25 tok/s | **80-120 tok/s** | **1.5-2x faster** |
+| Jetson Orin | 30-50 tok/s | **200-400 tok/s** | **2-3x faster** |
+| Apple M4 | 30-50 tok/s | **150-250 tok/s** | **1.5-2x faster** |
+| Raspberry Pi 5 | 10-20 tok/s | N/A (no GPU) | Jitter advantage |
+
+**The Mojo + C/CUDA combo will deliver both speed AND determinism.**
 
 ---
 
