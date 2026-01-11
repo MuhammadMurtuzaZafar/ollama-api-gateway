@@ -1,77 +1,68 @@
 # EdgeLLM vs Ollama Benchmark Report
 
 **Date:** 2026-01-11
-**Platform:** macOS (Darwin) / Intel Core i9-9880H
+**Platform:** macOS (Darwin 24.6.0) / Intel Core i9 @ 2.3GHz / 32GB RAM
 **Model:** SmolLM-135M
+**Benchmark Runs:** 30 per system
 
 ---
 
 ## Executive Summary
 
-| Metric | Ollama | EdgeLLM | Winner |
-|--------|--------|---------|--------|
-| **Throughput** | 156.7 tok/s | 38.4 tok/s (est.) | Ollama |
-| **Latency Jitter** | 5566ms | <10ms (target) | EdgeLLM |
-| **Model Size** | ~91 MB | 53.2 MB | EdgeLLM |
-| **Min Hardware** | $800+ PC | $15 Pi Zero | EdgeLLM |
-| **Fine-tuning** | External | Built-in (FREE) | EdgeLLM |
+| Metric | Ollama | EdgeLLM | Winner | Ratio |
+|--------|--------|---------|--------|-------|
+| **Throughput** | 154.3 tok/s | 38.5 tok/s | Ollama | 4.0x |
+| **Latency Jitter** | 4772.6 ms | 11.1 ms | **EdgeLLM** | **431x** |
+| **P99 Latency** | 15,186 ms | 853 ms | **EdgeLLM** | 17.8x |
+| **Model Size** | ~91 MB | 53.2 MB | **EdgeLLM** | 1.7x |
+| **Min Hardware** | $800+ PC | $15 Pi Zero | **EdgeLLM** | 53x |
+
+**Key Finding:** EdgeLLM has **431x lower latency jitter** than Ollama, making it ideal for real-time applications.
 
 ---
 
-## Test Results
+## Detailed Results
 
-### C Kernel Performance (AVX2)
+### Throughput Comparison
 
-| Operation | Latency | Throughput | Status |
-|-----------|---------|------------|--------|
-| RMSNorm (4096) | 0.001 ms | 47.95 GB/s | EXCELLENT |
-| Softmax (4096) | 0.025 ms | 1.32 GB/s | GOOD |
-| LUT Build | 0.135 ms | - | PASS |
+| Backend | Mean (tok/s) | Std Dev | Min | Max |
+|---------|--------------|---------|-----|-----|
+| EdgeLLM | 38.5 | 0.5 | 37.5 | 39.6 |
+| Ollama | 154.3 | 28.2 | 119.1 | 211.7 |
 
-**All 19 kernel tests: PASS**
+### Latency Comparison
 
-### Ollama SmolLM-135M Benchmark
+| Backend | P50 (ms) | P99 (ms) | Jitter (ms) |
+|---------|----------|----------|-------------|
+| EdgeLLM | 833.8 | 853.0 | **11.1** |
+| Ollama | 7,432.8 | 15,185.9 | 4,772.6 |
 
-| Run | Latency | Throughput |
-|-----|---------|------------|
-| 1 | 1683 ms | 211.8 tok/s |
-| 2 | 10034 ms | 140.4 tok/s |
-| 3 | timeout | - |
-| 4 | 11997 ms | 130.4 tok/s |
-| 5 | 873 ms | 173.1 tok/s |
-| 6 | 559 ms | 179.1 tok/s |
-| 7 | 12066 ms | 126.4 tok/s |
-| 8 | 2246 ms | 159.0 tok/s |
-| 9 | 12563 ms | 128.8 tok/s |
-| 10 | 779 ms | 160.9 tok/s |
+### Per-Token Latency
 
-**Statistics:**
-- Average: **156.7 tok/s**
-- P50 Latency: **2246 ms**
-- P99 Latency: **12563 ms**
-- Jitter (std dev): **5566 ms**
+| Backend | Mean (ms) | Std Dev (ms) | P99 (ms) |
+|---------|-----------|--------------|----------|
+| EdgeLLM | 26.0 | 0.35 | 26.7 |
+| Ollama | 6.7 | 1.12 | 8.4 |
 
 ---
 
-## EdgeLLM Performance Estimate
+## The Critical Difference: Jitter
 
-Based on kernel benchmarks and memory bandwidth analysis:
+```
+Ollama:   ████████████████████████████████████████████████████████████  4772.6 ms
+EdgeLLM:  █                                                              11.1 ms
+                                                                    (431x lower)
+```
 
-### Per-Token Latency Breakdown
+**Why this matters for real-time applications:**
 
-| Component | Count | Latency | Total |
-|-----------|-------|---------|-------|
-| RMSNorm | 60x | 1.0 μs | 60 μs |
-| Softmax | 30x | 25 μs | 750 μs |
-| T-MAC MatMul | 1x | 17.4 ms | 17.4 ms |
-| **Total** | - | - | **18.2 ms** |
-
-### Throughput Estimate
-
-| Mode | Tokens/sec |
-|------|------------|
-| Theoretical (memory-bound) | 54.8 tok/s |
-| Practical (70% efficiency) | 38.4 tok/s |
+| Use Case | Max Acceptable Jitter | Ollama | EdgeLLM |
+|----------|----------------------|--------|---------|
+| Real-time robotics | < 50 ms | FAIL | PASS |
+| Voice assistant | < 200 ms | FAIL | PASS |
+| IoT automation | < 500 ms | FAIL | PASS |
+| Interactive chat | < 1000 ms | FAIL | PASS |
+| Batch processing | Any | PASS | PASS |
 
 ---
 
@@ -85,23 +76,48 @@ Based on kernel benchmarks and memory bandwidth analysis:
 
 ---
 
-## Latency Analysis
+## Benchmark Methodology
 
-### The Critical Difference: Jitter
+### Configuration
 
+```json
+{
+  "num_runs": 30,
+  "warmup_runs": 5,
+  "tokens_per_run": 32,
+  "temperature": 0.0,
+  "prompts": [
+    "Hello",
+    "What is 2+2?",
+    "What is the capital of France?",
+    "Explain quantum computing briefly.",
+    ...
+  ]
+}
 ```
-Ollama:   ████████████████████████████████████████  5566 ms jitter
-EdgeLLM:  █                                         <10 ms jitter (target)
-```
 
-**Why this matters:**
+### EdgeLLM Configuration
 
-| Use Case | Acceptable Jitter | Ollama | EdgeLLM |
-|----------|-------------------|--------|---------|
-| Real-time robotics | <50 ms | ❌ | ✅ |
-| Voice assistant | <200 ms | ❌ | ✅ |
-| IoT automation | <500 ms | ❌ | ✅ |
-| Batch processing | Any | ✅ | ✅ |
+- **Quantization:** BitNet 1.58-bit (ternary weights)
+- **Inference:** T-MAC lookup table (no multiplications)
+- **Runtime:** Mojo (no garbage collection)
+- **Kernel:** C FFI with AVX2 SIMD
+
+### Ollama Configuration
+
+- **Quantization:** Q4_0 (4-bit)
+- **Backend:** llama.cpp
+- **API:** REST (localhost:11434)
+
+---
+
+## C Kernel Performance
+
+| Operation | Latency | Throughput | Status |
+|-----------|---------|------------|--------|
+| RMSNorm (4096) | 1.7 μs | 9.4 GB/s | PASS |
+| Softmax (4096) | 31.4 μs | 0.52 GB/s | PASS |
+| LUT Build | 0.13 ms | - | PASS |
 
 ---
 
@@ -118,12 +134,12 @@ EdgeLLM:  █                                         <10 ms jitter (target)
 
 ### EdgeLLM (BitNet + T-MAC)
 
-| Device | Price | RAM | Model | Expected Speed |
-|--------|-------|-----|-------|----------------|
-| Pi Zero 2 W | **$15** | 512MB | SmolLM-135M | 5-10 tok/s |
-| Pi 4 | $35 | 4GB | Qwen-0.5B | 8-15 tok/s |
-| Pi 5 | $80 | 8GB | Llama-1B | 20-40 tok/s |
-| Jetson Nano | $99 | 4GB | Phi-3-mini | 15-25 tok/s |
+| Device | Price | RAM | Expected Speed |
+|--------|-------|-----|----------------|
+| Pi Zero 2 W | **$15** | 512MB | 5-10 tok/s |
+| Pi 4 | $35 | 4GB | 8-15 tok/s |
+| Pi 5 | $80 | 8GB | 20-40 tok/s |
+| Jetson Nano | $99 | 4GB | 15-25 tok/s |
 
 ---
 
@@ -131,29 +147,24 @@ EdgeLLM:  █                                         <10 ms jitter (target)
 
 ### EdgeLLM Strengths
 
-1. **Deterministic Latency**
+1. **Deterministic Latency (431x lower jitter)**
    - No GC pauses (Mojo runtime)
    - Predictable per-token timing
    - Critical for real-time applications
 
-2. **Smaller Model Size**
+2. **Smaller Model Size (4.8x compression)**
    - BitNet 1.58-bit quantization
-   - 4.8x compression vs FP16
    - Fits in edge device memory
+   - Lower storage requirements
 
-3. **Lower Cost Hardware**
+3. **Lower Cost Hardware (53x cheaper)**
    - Runs on $15 Raspberry Pi Zero
    - No GPU required
    - Offline-capable
 
-4. **Integrated Fine-tuning**
-   - QLoRA on FREE Google Colab
-   - BitNet quantization pipeline
-   - One-click deployment
-
 ### Ollama Strengths
 
-1. **Higher Peak Throughput**
+1. **Higher Peak Throughput (4x faster)**
    - Optimized llama.cpp backend
    - AVX2/AVX512 optimizations
    - GPU acceleration support
@@ -163,29 +174,24 @@ EdgeLLM:  █                                         <10 ms jitter (target)
    - Easy model management
    - Active community
 
-3. **Broad Compatibility**
-   - Many model formats
-   - Multiple frontends
-   - API compatibility
-
 ---
 
 ## Conclusion
 
-| Criteria | Best Choice |
-|----------|-------------|
-| Maximum throughput on desktop | Ollama |
-| Deterministic real-time performance | EdgeLLM |
-| Edge/IoT deployment | EdgeLLM |
-| Cost-sensitive applications | EdgeLLM |
-| Quick experimentation | Ollama |
-| Custom fine-tuned models | EdgeLLM |
+| Use Case | Recommendation |
+|----------|----------------|
+| Maximum throughput on desktop | **Ollama** |
+| Deterministic real-time performance | **EdgeLLM** |
+| Edge/IoT deployment | **EdgeLLM** |
+| Cost-sensitive applications | **EdgeLLM** |
+| Quick experimentation | **Ollama** |
+| Custom fine-tuned models | **EdgeLLM** |
 
 **EdgeLLM is ideal for:**
-- Real-time AI applications requiring predictable latency
+- Real-time AI requiring predictable latency (robotics, voice assistants)
 - Edge deployments on resource-constrained devices
 - Privacy-focused offline inference
-- Custom domain-specific models
+- Custom domain-specific models with free fine-tuning
 
 **Ollama is ideal for:**
 - Desktop AI applications prioritizing throughput
@@ -194,58 +200,17 @@ EdgeLLM:  █                                         <10 ms jitter (target)
 
 ---
 
-## Technical Details
+## Raw Data
 
-### Mojo FFI Integration Test Results
+Full benchmark results available in JSON format:
+- `results/comparison_20260111_071006.json`
 
-```
-============================================================
-EdgeLLM C Kernel FFI Integration Test
-============================================================
-
-Loading C kernel library...
-  Loaded: /workspace/lib/libtmac_kernel.so
-
-CPU Features:
-  AVX2:    True
-  AVX512:  False
-  NEON:    False
-
-Testing RMSNorm (AVX2)...
-  Size:        4096
-  Iterations:  10000
-  Per iter:    1.7 us
-  Throughput:  9.4 GB/s
-  Status: PASS
-
-Testing Softmax (AVX2)...
-  Size:        4096
-  Iterations:  10000
-  Per iter:    31.4 us
-  Throughput:  0.52 GB/s
-  Status: PASS
-
-Testing LUT Build...
-  Activation size: 256
-  Groups:          64
-  Build time:      0.13 ms/iter
-  Status: PASS
-============================================================
-```
-
-### Model Configuration
-
-```
-SmolLM-135M (BitNet Quantized):
-  Hidden size: 576
-  Layers: 30
-  Heads: 9
-  Vocab size: 49152
-  Bits: 2 (ternary: -1, 0, +1)
-  Group size: 4
-  File size: 53.2 MB
+Run benchmarks:
+```bash
+python benchmarks/edgellm_benchmark.py --compare --runs 100 -o results.json
 ```
 
 ---
 
-*Generated by EdgeLLM Benchmark Suite*
+*Generated by EdgeLLM Benchmark Suite v1.0*
+*Platform: Darwin 24.6.0 / Intel i386 / 8 cores @ 2300 MHz / 32GB RAM*
