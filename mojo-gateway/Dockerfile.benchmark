@@ -1,0 +1,68 @@
+# EdgeLLM Benchmark Docker Image
+# For running comprehensive benchmarks on fly.io or any cloud platform
+
+FROM ubuntu:22.04
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    clang \
+    curl \
+    git \
+    python3 \
+    python3-pip \
+    python3-venv \
+    wget \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pixi for Mojo
+RUN curl -fsSL https://pixi.sh/install.sh | sh
+ENV PATH="/root/.pixi/bin:$PATH"
+
+# Create workspace
+WORKDIR /workspace
+
+# Copy project files
+COPY . /workspace/
+
+# Initialize pixi and install Mojo
+RUN pixi init -c https://conda.modular.com/max-nightly/ -c conda-forge \
+    && pixi add mojo \
+    && pixi add python>=3.11
+
+# Build C kernels
+RUN if [ -f src/kernels/Makefile ]; then \
+        make -C src/kernels clean all; \
+    fi
+
+# Install Python dependencies for benchmarking
+RUN pip3 install --no-cache-dir \
+    psutil \
+    requests \
+    numpy \
+    matplotlib
+
+# Build EdgeLLM Mojo binary
+RUN mkdir -p bin && \
+    pixi run mojo build -O3 src/bitnet_tmac_lut.mojo -o bin/edgellm 2>/dev/null || \
+    echo "Mojo build skipped (will use simulation mode)"
+
+# Download SmolLM model if not present
+RUN mkdir -p models && \
+    if [ ! -f models/smollm-135m.tmac2.bin ]; then \
+        echo "Model file will be downloaded at runtime"; \
+    fi
+
+# Make benchmark scripts executable
+RUN chmod +x benchmarks/*.py 2>/dev/null || true
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV MOJO_PYTHON_LIBRARY=/usr/lib/python3.10
+
+# Default command: run benchmark
+CMD ["python3", "benchmarks/edgellm_benchmark.py", "--backend", "edgellm", "--runs", "100", "--output", "/workspace/results/benchmark.json"]

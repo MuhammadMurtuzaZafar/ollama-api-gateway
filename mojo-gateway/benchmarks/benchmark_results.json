@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-01-11 06:12:00",
+  "kernel": {
+    "rmsnorm": {
+      "latency_ms": 0.001,
+      "throughput_gbps": 33.23,
+      "size": 4096,
+      "iterations": 10000
+    },
+    "softmax": {
+      "latency_ms": 0.035,
+      "throughput_gbps": 0.94,
+      "size": 4096,
+      "iterations": 10000
+    }
+  },
+  "ollama": null,
+  "theoretical": {
+    "SmolLM-135M (BitNet)": {
+      "size_mb": 35,
+      "max_tps_ddr4": 348.77232142857144,
+      "max_tps_m1": 929.8324584960938
+    },
+    "SmolLM-135M (FP16)": {
+      "size_mb": 270,
+      "max_tps_ddr4": 45.211226851851855,
+      "max_tps_m1": 120.5338372124566
+    },
+    "Llama-1B (BitNet)": {
+      "size_mb": 200,
+      "max_tps_ddr4": 61.03515625,
+      "max_tps_m1": 162.7206802368164
+    },
+    "Llama-1B (FP16)": {
+      "size_mb": 2000,
+      "max_tps_ddr4": 6.103515625,
+      "max_tps_m1": 16.27206802368164
+    }
+  }
+}
