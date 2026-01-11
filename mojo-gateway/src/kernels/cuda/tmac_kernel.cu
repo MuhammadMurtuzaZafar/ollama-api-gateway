@@ -1410,9 +1410,13 @@ int fused_rmsnorm_matmul_cuda_adaptive(
     }
 }
 
+} // End extern "C" - WMMA code below uses C++ templates
+
 // ============================================================================
 // Phase 3: INT8 Tensor Core Implementation
 // ============================================================================
+// NOTE: This section is OUTSIDE extern "C" because WMMA uses C++ templates.
+// The C-callable API wrappers are defined later in a new extern "C" block.
 
 // Check for Tensor Core support (compile-time)
 #if __CUDA_ARCH__ >= 750
@@ -1710,6 +1714,11 @@ __global__ void int8_fallback_matmul_kernel(
         }
     }
 }
+
+// ============================================================================
+// C Interface for INT8 Tensor Core API (extern "C" for FFI)
+// ============================================================================
+extern "C" {
 
 /**
  * Get compute capability of current device
