@@ -1,0 +1,54 @@
+{% set name = "edgellm" %}
+{% set version = "0.1.0" %}
+
+package:
+  name: {{ name }}
+  version: {{ version }}
+
+source:
+  path: ..
+
+build:
+  number: 0
+  script: |
+    mkdir -p $PREFIX/bin
+    mkdir -p $PREFIX/lib/edgellm
+    pixi run build-cli
+    cp bin/edgellm $PREFIX/bin/edgellm
+    cp -r src $PREFIX/lib/edgellm/
+    cp -r models $PREFIX/lib/edgellm/ 2>/dev/null || true
+    chmod +x $PREFIX/bin/edgellm
+
+requirements:
+  host:
+    - mojo >=0.25.7,<0.26
+    - max >=25.1
+  run:
+    - mojo >=0.25.7,<0.26
+    - max >=25.1
+
+test:
+  commands:
+    - edgellm --help
+
+about:
+  home: https://github.com/umerkhan95/ollama-api-gateway
+  license: MIT
+  license_family: MIT
+  summary: High-performance LLM inference for edge devices with deterministic latency
+  description: |
+    EdgeLLM is a platform for fine-tuning, optimizing, and deploying custom LLMs
+    to edge devices with deterministic real-time performance. Built with Mojo
+    (no GC) + hybrid C FFI kernels.
+
+    Features:
+    - BitNet 1.58-bit quantization (4.8x compression)
+    - T-MAC lookup table inference (no multiplication)
+    - 15.5x lower latency jitter than Ollama
+    - 2.5x faster attention on GPU (INT8 dp4a)
+    - Runs on $15 Raspberry Pi Zero
+  dev_url: https://github.com/umerkhan95/ollama-api-gateway
+
+extra:
+  recipe-maintainers:
+    - umerkhan95

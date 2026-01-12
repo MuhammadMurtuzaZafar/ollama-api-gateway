@@ -24,6 +24,8 @@
 - **Kaggle T4 GPU testing pipeline**
 - **INT8 `__dp4a` Flash Attention kernel (2.5x faster than Ollama)**
 - **Real T4 benchmark: 1,490 tok/s attention (Qwen-0.5B)**
+- **Ollama-style Mojo CLI (`edgellm pull`, `edgellm run`, `edgellm serve`)**
+- **Multi-tenant API gateway (FastAPI + PostgreSQL)**
 
 ### In Progress
 - **INT8 `__dp4a` kernel validated - 2.5x faster than Ollama attention**
@@ -96,7 +98,9 @@ CPU Jitter:     Ollama ███████████████████
 
 | File | Purpose |
 |------|---------|
+| `src/edgellm_cli.mojo` | **Ollama-style CLI (pull, run, serve, models)** |
 | `src/bitnet_tmac_lut.mojo` | Main inference with T-MAC LUT |
+| `src/bitnet_server.mojo` | Server mode with stdin/stdout protocol |
 | `src/kernels/tmac_kernel.c` | C FFI kernel (AVX2/NEON) |
 | `src/kernels/cuda/tmac_kernel.cu` | CUDA kernel (GPU) |
 | `src/kernels/cuda/flash_attention_int8.cu` | **INT8 `__dp4a` attention (2.5x faster)** |
@@ -107,6 +111,9 @@ CPU Jitter:     Ollama ███████████████████
 | `src/edgellm/ffi/test_ffi.mojo` | FFI integration test |
 | `benchmarks/edgellm_benchmark.py` | Automated benchmark suite |
 | `scripts/quantize/quantize_bitnet.py` | BitNet quantization |
+| `backend/main.py` | **FastAPI gateway (auth, rate limiting, usage)** |
+| `backend/database.py` | PostgreSQL models (APIKey, UsageLog) |
+| `docker-compose.fullstack.yml` | **Full stack deployment (API + Inference + DB)** |
 | `Dockerfile.mojo` | Mojo development container |
 | `Dockerfile.benchmark` | Benchmark container for fly.io |
 | `PAPER_ROADMAP.md` | Research paper roadmap |
@@ -175,6 +182,48 @@ pixi run mojo build -O3 src/bitnet_tmac_lut.mojo -o bin/edgellm
 
 # Run benchmarks
 python benchmarks/edgellm_benchmark.py --compare --runs 100
+```
+
+## EdgeLLM CLI (Ollama-style)
+
+```bash
+# Build CLI
+pixi run build-cli
+
+# Or run directly
+pixi run cli --help
+
+# List available models
+./bin/edgellm models
+
+# Download and quantize a model
+./bin/edgellm pull smollm-135m
+
+# Interactive chat
+./bin/edgellm run smollm-135m
+
+# Start API server
+./bin/edgellm serve smollm-135m --port 8080
+
+# Show model info
+./bin/edgellm info smollm-135m
+```
+
+## Full Stack Deployment
+
+```bash
+# Start API gateway + inference server + database
+docker compose -f docker-compose.fullstack.yml up -d
+
+# API endpoints available at http://localhost:8000
+# Demo admin key: edgellm-admin-demo-key-12345
+# Demo user key: edgellm-user-demo-key-67890
+
+# Test the API
+curl -X POST http://localhost:8000/api/generate \
+    -H "Authorization: Bearer edgellm-user-demo-key-67890" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"smollm-135m","prompt":"Hello"}'
 ```
 
 ## Quantization Commands

@@ -15,7 +15,7 @@ const ApiDocs = () => {
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "functiongemma",
+    "model": "smollm-135m",
     "messages": [
       {"role": "system", "content": "You are a helpful assistant."},
       {"role": "user", "content": "Hello!"}
@@ -32,7 +32,7 @@ headers = {
     "Content-Type": "application/json"
 }
 payload = {
-    "model": "functiongemma",
+    "model": "smollm-135m",
     "messages": [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Hello!"}
@@ -51,7 +51,7 @@ print(response.json())`,
     'Content-Type': 'application/json'
   },
   body: JSON.stringify({
-    model: 'functiongemma',
+    model: 'smollm-135m',
     messages: [
       { role: 'system', content: 'You are a helpful assistant.' },
       { role: 'user', content: 'Hello!' }
@@ -118,7 +118,7 @@ console.log(data);`
                 <p className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Request Body:</p>
                 <pre className="text-xs text-gray-600 dark:text-gray-400 overflow-x-auto">
 {`{
-  "model": "functiongemma",           // Required: Model name
+  "model": "smollm-135m",           // Required: Model name
   "messages": [                        // Required: Array of messages
     {
       "role": "system|user|assistant", // Required: Message role
@@ -150,9 +150,14 @@ console.log(data);`
 {`{
   "models": [
     {
-      "name": "functiongemma",
-      "modified_at": "2025-12-23T10:30:00Z",
-      "size": 5000000000
+      "name": "smollm-135m",
+      "modified_at": "2026-01-12T10:30:00Z",
+      "size": 41600000
+    },
+    {
+      "name": "qwen2-0.5b",
+      "modified_at": "2026-01-12T10:30:00Z",
+      "size": 156000000
     }
   ]
 }`}

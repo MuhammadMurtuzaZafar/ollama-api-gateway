@@ -1,0 +1,51 @@
+# EdgeLLM Conda Recipe (rattler-build format)
+# Build with: rattler-build build --recipe conda-recipe/recipe.yaml
+
+schema_version: 1
+
+package:
+  name: edgellm
+  version: "0.1.0"
+
+source:
+  path: ..
+
+build:
+  number: 0
+  script:
+    - mkdir -p $PREFIX/bin
+    - mkdir -p $PREFIX/lib/edgellm
+    - pixi run build-cli
+    - cp bin/edgellm $PREFIX/bin/edgellm
+    - chmod +x $PREFIX/bin/edgellm
+
+requirements:
+  host:
+    - mojo >=0.25.7,<0.26
+    - max >=25.1
+  run:
+    - mojo >=0.25.7,<0.26
+
+tests:
+  - script:
+      - edgellm --help
+
+about:
+  homepage: https://github.com/umerkhan95/ollama-api-gateway
+  license: MIT
+  summary: High-performance LLM inference for edge devices
+  description: |
+    EdgeLLM - Fine-tune once, deploy everywhere.
+
+    Features:
+    - Ollama-style CLI (pull, run, serve)
+    - BitNet 1.58-bit quantization
+    - 15.5x lower jitter than Ollama
+    - 2.5x faster GPU attention (INT8)
+    - Multi-tenant API gateway
+  repository: https://github.com/umerkhan95/ollama-api-gateway
+  documentation: https://github.com/umerkhan95/ollama-api-gateway/blob/main/README.md
+
+extra:
+  maintainers:
+    - umerkhan95
