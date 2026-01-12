@@ -600,11 +600,8 @@ struct CUDAInference:
         if not self.available:
             return False
 
-        var ret = self.flash_attn.call[
-            "attention_stateless_init",
-            Int32,
-            Int32, Int32, Int32
-        ](Int32(n_heads), Int32(max_seq), Int32(head_dim))
+        var ret = self.flash_attn.call["attention_stateless_init", Int32](
+            Int32(n_heads), Int32(max_seq), Int32(head_dim))
 
         if ret == 0:
             self.initialized = True
@@ -629,14 +626,10 @@ struct CUDAInference:
         if not self.initialized:
             return -1
 
-        return Int(self.flash_attn.call[
-            "attention_stateless_fast",
-            Int32,
-            UnsafePointer[Float32], UnsafePointer[Float32],
-            UnsafePointer[Float32], UnsafePointer[Float32],
-            Int32, Int32, Int32
-        ](q_ptr, k_cache_ptr, v_cache_ptr, o_ptr,
-          Int32(n_heads), Int32(cache_len), Int32(head_dim)))
+        # Use simplified FFI call for Mojo 0.25.7
+        return Int(self.flash_attn.call["attention_stateless_fast", Int32](
+            q_ptr, k_cache_ptr, v_cache_ptr, o_ptr,
+            Int32(n_heads), Int32(cache_len), Int32(head_dim)))
 
     fn cleanup(mut self):
         """Cleanup CUDA resources."""
