@@ -35,6 +35,8 @@
 #include "ffn_kernel.h"             // Feed-Forward Network (SwiGLU)
 #include "embeddings_kernel.h"      // Token Embeddings + RoPE
 #include "sampling_kernel.h"        // Sampling (Top-P, Top-K, Greedy)
+#include "linear_projection.h"      // Linear projections (Q/K/V, LM head)
+#include "residual_add.h"           // Residual connections
 
 #ifdef __cplusplus
 extern "C" {

@@ -44,6 +44,9 @@ RMSNORM_TARGET = $(LIB_DIR)/librmsnorm_kernel.$(SHARED_EXT)
 FFN_TARGET = $(LIB_DIR)/libffn_kernel.$(SHARED_EXT)
 EMBEDDINGS_TARGET = $(LIB_DIR)/libembeddings_kernel.$(SHARED_EXT)
 SAMPLING_TARGET = $(LIB_DIR)/libsampling_kernel.$(SHARED_EXT)
+LINEAR_TARGET = $(LIB_DIR)/liblinear_projection.$(SHARED_EXT)
+RESIDUAL_TARGET = $(LIB_DIR)/libresiudal_add.$(SHARED_EXT)
+PIPELINE_TARGET = $(LIB_DIR)/libinference_pipeline.$(SHARED_EXT)
 INFERENCE_TARGET = $(LIB_DIR)/libedgellm_inference.$(SHARED_EXT)
 
 SOURCES = tmac_kernel.cu flash_attention.cu
@@ -55,6 +58,9 @@ RMSNORM_OBJ = rmsnorm_kernel.o
 FFN_OBJ = ffn_kernel.o
 EMBEDDINGS_OBJ = embeddings_kernel.o
 SAMPLING_OBJ = sampling_kernel.o
+LINEAR_OBJ = linear_projection.o
+RESIDUAL_OBJ = residual_add.o
+PIPELINE_OBJ = inference_pipeline.o
 
 .PHONY: all clean test install dirs check info
 
@@ -225,23 +231,60 @@ $(SAMPLING_TARGET): sampling_kernel.o
 sampling: dirs $(SAMPLING_TARGET)
 	@echo "Built Sampling kernel (temperature, top-k, top-p)"
 
-# Full inference pipeline library
-INFERENCE_OBJS = flash_attention_int8.o rmsnorm_kernel.o ffn_kernel.o embeddings_kernel.o sampling_kernel.o
+# Linear projection kernel (Q/K/V, output, LM head) - uses cuBLAS
+linear_projection.o: linear_projection.cu linear_projection.h
+	$(NVCC) $(NVCC_FLAGS) -c $< -o $@ -lcublas
+
+$(LINEAR_TARGET): linear_projection.o
+	$(NVCC) $(SHARED_FLAGS) -o $@ $^ -lcudart -lcublas
+	@echo "Built Linear projection kernel: $(LINEAR_TARGET)"
+
+linear: dirs $(LINEAR_TARGET)
+	@echo "Built Linear projection kernel (cuBLAS SGEMM)"
+
+# Residual add kernel (element-wise add + fused RMSNorm)
+residual_add.o: residual_add.cu residual_add.h
+	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
+
+$(RESIDUAL_TARGET): residual_add.o
+	$(NVCC) $(SHARED_FLAGS) -o $@ $^ -lcudart
+	@echo "Built Residual add kernel: $(RESIDUAL_TARGET)"
+
+residual: dirs $(RESIDUAL_TARGET)
+	@echo "Built Residual add kernel (vectorized + fused RMSNorm)"
+
+# Inference pipeline orchestrator
+inference_pipeline.o: inference_pipeline.cu inference_pipeline.h inference_kernels.h linear_projection.h residual_add.h
+	$(NVCC) $(INT8_NVCC_FLAGS) -c $< -o $@ -lcublas -lcurand
+
+$(PIPELINE_TARGET): inference_pipeline.o flash_attention_int8.o rmsnorm_kernel.o ffn_kernel.o embeddings_kernel.o sampling_kernel.o linear_projection.o residual_add.o
+	$(NVCC) $(SHARED_FLAGS) -o $@ $^ -lcudart -lcublas -lcurand
+	@echo "Built Inference pipeline: $(PIPELINE_TARGET)"
+
+pipeline: dirs $(PIPELINE_TARGET)
+	@echo "Built complete inference pipeline orchestrator"
+
+# Full inference pipeline library (all kernels in one .so)
+INFERENCE_OBJS = flash_attention_int8.o rmsnorm_kernel.o ffn_kernel.o embeddings_kernel.o sampling_kernel.o linear_projection.o residual_add.o
 
 $(INFERENCE_TARGET): $(INFERENCE_OBJS)
-	$(NVCC) $(SHARED_FLAGS) -o $@ $^ -lcudart -lcurand
+	$(NVCC) $(SHARED_FLAGS) -o $@ $^ -lcudart -lcurand -lcublas
 	@echo "Built EdgeLLM Inference library: $(INFERENCE_TARGET)"
 
 inference: dirs $(INFERENCE_OBJS) $(INFERENCE_TARGET)
 	@echo "Built complete EdgeLLM inference pipeline"
 
 # Build all inference kernels separately
-inference-all: dirs rmsnorm ffn embeddings sampling int8
-	@echo "Built all inference kernels (RMSNorm, FFN, Embeddings, Sampling, INT8 Attention)"
+inference-all: dirs rmsnorm ffn embeddings sampling linear residual int8
+	@echo "Built all inference kernels (RMSNorm, FFN, Embeddings, Sampling, Linear, Residual, INT8 Attention)"
 
 # Build unified inference library (recommended)
 inference-unified: dirs $(INFERENCE_TARGET)
 	@echo "Built unified EdgeLLM inference library"
+
+# Build complete pipeline with orchestrator (FULL INFERENCE)
+inference-pipeline: dirs $(PIPELINE_TARGET)
+	@echo "Built complete EdgeLLM inference pipeline with orchestrator"
 
 # Test binary
 test: dirs $(OBJECTS)
@@ -276,8 +319,8 @@ test-all-multi-gpu: test-all test-fa2-multi-gpu
 # Clean
 clean:
 	rm -f $(OBJECTS) flash_attention_int8.o flash_attention_v2.o flash_attention_v2_multi_gpu.o flash_attention_v2_optimized.o $(TARGET) $(STATIC_TARGET) $(FA_TARGET) $(INT8_TARGET) $(FA2_TARGET) $(FA2_MG_TARGET) $(FA2_OPT_TARGET)
-	rm -f rmsnorm_kernel.o ffn_kernel.o embeddings_kernel.o sampling_kernel.o
-	rm -f $(RMSNORM_TARGET) $(FFN_TARGET) $(EMBEDDINGS_TARGET) $(SAMPLING_TARGET) $(INFERENCE_TARGET)
+	rm -f rmsnorm_kernel.o ffn_kernel.o embeddings_kernel.o sampling_kernel.o linear_projection.o residual_add.o inference_pipeline.o
+	rm -f $(RMSNORM_TARGET) $(FFN_TARGET) $(EMBEDDINGS_TARGET) $(SAMPLING_TARGET) $(LINEAR_TARGET) $(RESIDUAL_TARGET) $(PIPELINE_TARGET) $(INFERENCE_TARGET)
 	rm -f $(BIN_DIR)/test_cuda_kernel $(BIN_DIR)/test_flash_attention $(BIN_DIR)/test_flash_attention_int8 $(BIN_DIR)/test_flash_attention_v2_multi_gpu $(BIN_DIR)/test_flash_attention_v2_optimized
 
 # Install to system (optional)
@@ -359,8 +402,12 @@ info:
 	@echo "  make ffn        - Build FFN/MLP kernel (SwiGLU)"
 	@echo "  make embeddings - Build Embeddings kernel (token lookup + RoPE)"
 	@echo "  make sampling   - Build Sampling kernel (temperature, top-k, top-p)"
-	@echo "  make inference-all     - Build all inference kernels separately"
-	@echo "  make inference-unified - Build unified inference library (RECOMMENDED)"
+	@echo "  make linear     - Build Linear projection kernel (Q/K/V, LM head)"
+	@echo "  make residual   - Build Residual add kernel (+ fused RMSNorm)"
+	@echo "  make pipeline   - Build inference pipeline orchestrator"
+	@echo "  make inference-all      - Build all inference kernels separately"
+	@echo "  make inference-unified  - Build unified inference library"
+	@echo "  make inference-pipeline - Build complete pipeline (RECOMMENDED)"
 	@echo ""
 	@echo "Test targets:"
 	@echo "  make test       - Run T-MAC kernel tests"
