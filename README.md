@@ -1,604 +1,321 @@
-# EdgeLLM API Gateway
+# EdgeLLM
 
-> **High-performance LLM inference with deterministic latency for edge devices with a modern React dashboard**
+> **Fine-tune once, deploy everywhere — from cloud to $15 edge devices**
 
-A production-ready API gateway for EdgeLLM with FastAPI backend, PostgreSQL database, React frontend, and comprehensive monitoring. Features role-based access control, usage analytics, rate limiting, and an interactive playground for testing AI models with **15.5x lower latency jitter** than traditional inference.
+High-performance LLM inference engine with **2.5x faster GPU attention** and **15.5x lower latency jitter** than Ollama. Built with Mojo for deterministic real-time performance.
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Docker](https://img.shields.io/badge/docker-ready-brightgreen.svg)
-![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
-![Node](https://img.shields.io/badge/node-18+-green.svg)
-
----
-
-## Key Advantages
-
-| Metric | EdgeLLM | Traditional |
-|--------|---------|-------------|
-| **Latency Jitter** | 373 ms | 5,799 ms |
-| **Model Size** | 40 MB | 91 MB |
-| **Min Hardware** | $15 Pi Zero | $800+ PC |
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/umerkhan95/EdgeLLM)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Mojo](https://img.shields.io/badge/mojo-0.25.7-orange.svg)](https://www.modular.com/mojo)
+[![Docker](https://img.shields.io/badge/docker-ready-brightgreen.svg)](https://hub.docker.com)
 
 ---
 
-## Screenshots
+## Benchmarks
 
-### Home Page
-![Home Page](./assets/home.png)
+### GPU Performance (Tesla T4)
 
-### Admin Dashboard
-![Dashboard](./assets/dashboard.png)
+| Metric | Ollama | EdgeLLM | Winner |
+|--------|--------|---------|--------|
+| **Attention Throughput** | ~598 tok/s | **1,490 tok/s** | EdgeLLM **2.5x** |
+| **Layer Latency** | N/A | 27.97 μs | EdgeLLM |
+
+### CPU Performance (x86)
+
+| Metric | Ollama | EdgeLLM | Winner |
+|--------|--------|---------|--------|
+| **Latency Jitter** | 5,799 ms | **373 ms** | EdgeLLM **15.5x** |
+| **Model Size** | 91 MB | **40 MB** | EdgeLLM **2.3x** |
 
 ---
 
-## Key Features
+## Quick Start
 
-### Security & Authentication
-- **API Key Authentication** - Secure Bearer token authentication
-- **Role-Based Access Control** - Admin and user roles with different permissions
-- **Secure Key Generation** - Cryptographically secure key generation
-- **Rate Limiting** - Configurable per-user hourly limits
+### Install (One-Liner)
 
-### Monitoring & Analytics
-- **Usage Tracking** - Detailed statistics for requests and response times
-- **Admin Dashboard** - View all users' request patterns
-- **User Analytics** - Personal usage statistics and metrics
-- **Real-time Charts** - Interactive data visualization
-- **Historical Data** - Track usage over 24h and 7d periods
+```bash
+curl -fsSL https://raw.githubusercontent.com/umerkhan95/EdgeLLM/main/mojo-gateway/install.sh | bash
+```
 
-### Database & Performance
-- **PostgreSQL** - Persistent storage with async support
-- **Connection Pooling** - High-performance database queries
-- **ACID Compliance** - Data integrity and consistency
-- **Scalable Design** - Handle millions of requests
+### Install via Pixi
 
-### User Interface
-- **Modern React UI** - Clean, responsive design with Tailwind CSS
-- **Dark Mode** - Full dark/light theme support
-- **Mobile Responsive** - Works seamlessly on all devices
-- **Interactive Playground** - Test AI models with custom parameters
-- **Real-time Updates** - Live statistics and analytics
+```bash
+pixi add edgellm --channel https://prefix.dev/edgellm
+```
 
-### API Documentation
-- **Swagger UI** - Interactive API documentation at `/docs`
-- **ReDoc** - Alternative API documentation view
-- **Auto-Generated Specs** - OpenAPI 3.0 specification
+### Usage
+
+```bash
+# List available models
+edgellm models
+
+# Download a model
+edgellm pull smollm-135m
+
+# Interactive chat
+edgellm run smollm-135m
+
+# Start API server
+edgellm serve smollm-135m --port 8080
+```
+
+---
+
+## Features
+
+### Inference Engine
+- **BitNet 1.58-bit** quantization (4.8x compression)
+- **T-MAC** lookup table inference (no multiplication)
+- **INT8 `__dp4a`** GPU kernels (Turing+)
+- **Zero-copy** KV cache management
+- **Deterministic latency** (no GC pauses)
+
+### API Gateway
+- **Multi-tenant** API key management
+- **Role-based** access control (admin/user)
+- **Rate limiting** per API key
+- **Usage analytics** and monitoring
+- **PostgreSQL** persistent storage
+
+### Frontend Dashboard
+- **React + Vite** modern UI
+- **Dark mode** support
+- **Interactive playground**
+- **Real-time statistics**
 
 ---
 
 ## Architecture
 
 ```
-edgellm-api-gateway/
-├── backend/                      # FastAPI backend service
-│   ├── main.py                   # API endpoints and business logic
-│   ├── database.py               # SQLAlchemy models and async connections
-│   ├── requirements.txt          # Python dependencies
-│   ├── Dockerfile                # Backend container config
-│   └── README.md                 # Backend documentation
-│
-├── frontend/                     # React + Vite frontend application
+EdgeLLM/
+├── mojo-gateway/              # Mojo inference engine
 │   ├── src/
-│   │   ├── components/           # Reusable React components
-│   │   │   ├── Navbar.jsx
-│   │   │   ├── Charts.jsx
-│   │   │   ├── StatsCard.jsx
-│   │   │   └── APIKeyForm.jsx
-│   │   ├── pages/                # Page components
-│   │   │   ├── Home.jsx
-│   │   │   ├── AdminDashboard.jsx
-│   │   │   ├── UserDashboard.jsx
-│   │   │   ├── Playground.jsx
-│   │   │   └── ApiDocs.jsx
-│   │   ├── context/              # React context providers
-│   │   │   ├── AuthContext.jsx
-│   │   │   └── ThemeContext.jsx
-│   │   ├── services/             # API service layer
-│   │   │   └── api.js
-│   │   ├── App.jsx
-│   │   └── main.jsx
-│   ├── public/                   # Static files
-│   │   ├── favicon.svg
-│   │   └── assets/
-│   ├── package.json
-│   ├── vite.config.js
-│   ├── tailwind.config.js
-│   ├── Dockerfile
-│   └── README.md
+│   │   ├── edgellm_cli.mojo   # Ollama-style CLI
+│   │   ├── bitnet_tmac_lut.mojo
+│   │   └── kernels/
+│   │       └── cuda/          # INT8 dp4a kernels
+│   ├── install.sh             # One-liner installer
+│   └── conda-recipe/          # Pixi/Magic distribution
 │
-├── mojo-gateway/                 # EdgeLLM inference engine
-│   ├── src/
-│   │   ├── bitnet_tmac_lut.mojo  # Main inference with T-MAC LUT
-│   │   └── kernels/              # C FFI SIMD kernels
-│   ├── models/                   # Model files (.tm2.bin)
-│   ├── benchmarks/               # Benchmark suite
-│   └── README.md                 # Inference engine docs
+├── backend/                   # FastAPI gateway
+│   ├── main.py                # API endpoints
+│   └── database.py            # PostgreSQL models
 │
-├── docker-compose.yml            # Multi-container orchestration
-├── .env                          # Environment variables (gitignored)
-├── .env.example                  # Environment template
-├── ENV_CONFIGURATION.md          # Detailed environment guide
-└── README.md                     # This file
+└── frontend/                  # React dashboard
+    └── src/
+        ├── pages/
+        └── components/
 ```
 
 ---
 
-## Quick Start
+## Full Stack Deployment
 
-### Prerequisites
+### Docker Compose
 
-- **Docker & Docker Compose** - For containerized deployment
-- **EdgeLLM Inference** - Running locally at http://localhost:8080
-- **Git** - To clone the repository
-- **Port 3000, 8000, 5432** - Must be available
-
-### Option 1: Docker (Recommended)
-
-#### 1. Clone the Repository
 ```bash
-git clone https://github.com/yourusername/edgellm-api-gateway.git
-cd edgellm-api-gateway
+cd mojo-gateway
+docker compose -f docker-compose.fullstack.yml up -d
 ```
 
-#### 2. Configure Environment
-```bash
-# Copy the example environment file
-cp .env.example .env
-
-# Edit .env with your settings (see Configuration section below)
-nano .env
-```
-
-#### 3. Start Services
-```bash
-# Build and start all containers
-docker compose up -d
-
-# Check if all services are running
-docker compose ps
-
-# View logs
-docker compose logs -f
-```
-
-#### 4. Access Application
-- **Frontend**: http://localhost:3000
-- **Backend API**: http://localhost:8000
+**Services:**
+- **API Gateway**: http://localhost:8000
 - **API Docs**: http://localhost:8000/docs
-- **Database**: localhost:5432
-
-### Option 2: Local Development
-
-#### 1. Backend Setup
-```bash
-cd backend
-
-# Create virtual environment
-python3.11 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the backend
-python main.py
-```
-
-#### 2. Frontend Setup
-```bash
-cd frontend
-
-# Install dependencies
-npm install
-
-# Start development server
-npm run dev
-```
-
----
-
-## Environment Configuration
-
-### Overview
-Environment variables are configured through the `.env` file. This file controls all aspects of the application including database connections, API settings, and feature toggles.
-
-### File Structure
-```
-.env                 # Your local configuration (never commit)
-.env.example        # Template with all available variables
-ENV_CONFIGURATION.md # Detailed documentation for each variable
-```
-
-### Quick Setup
-
-#### 1. Create `.env` File
-```bash
-cp .env.example .env
-```
-
-#### 2. Essential Variables
-The minimum required configuration:
-
-```env
-# Database
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/edgellm_api
-
-# API Keys (for demo - generate new ones for production)
-DEMO_ADMIN_KEY=demo-admin-key-12345
-DEMO_USER_KEY=demo-user-key-67890
-
-# Frontend
-VITE_API_URL=http://localhost:8000
-```
-
-#### 3. Apply Configuration
-```bash
-# Docker automatically reads .env
-docker compose up -d
-
-# Or manually export for local development
-export $(cat .env | xargs)
-```
-
----
-
-## Complete Environment Variables
-
-### Database Configuration
-
-```env
-# PostgreSQL Connection
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/edgellm_api
-
-# Connection Details
-POSTGRES_DB=edgellm_api
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=postgres
-POSTGRES_PORT=5432
-```
-
-**Usage**: Controls how the backend connects to PostgreSQL
-**Default**: Built-in PostgreSQL container
-**Production**: Use managed database service (AWS RDS, Google Cloud SQL, etc.)
-
----
-
-### Backend API Configuration
-
-```env
-# Security
-SECRET_KEY=NKLdJTql1oGCsTOGqdpJGVQCkt6FntM5D5ffiODjqRc
-
-# Token Settings
-ACCESS_TOKEN_EXPIRE_MINUTES=60
-
-# Server
-HOST=0.0.0.0
-PORT=8000
-```
-
-**SECRET_KEY**: Used for JWT token signing
-- Generate new: `openssl rand -hex 32`
-- Must be different in production
-
-**ACCESS_TOKEN_EXPIRE_MINUTES**: JWT token lifetime
-- Default: 60 minutes
-- Adjust based on security requirements
-
-**HOST**: Interface to bind to
-- `0.0.0.0` = Listen on all interfaces (Docker)
-- `127.0.0.1` = Localhost only (development)
-
-**PORT**: Backend service port
-- Default: 8000
-- Change if port is already in use
-
----
-
-### EdgeLLM Configuration
-
-```env
-# EdgeLLM Service URL
-EDGELLM_BASE_URL=http://host.docker.internal:8080
-```
-
-**For Different Environments**:
-
-| Environment | URL | Notes |
-|---|---|---|
-| **Docker (macOS/Windows)** | `http://host.docker.internal:8080` | Special Docker DNS |
-| **Docker (Linux)** | `http://172.17.0.1:8080` | Host gateway IP |
-| **Local Development** | `http://localhost:8080` | Direct localhost |
-| **Remote Server** | `http://your-host:8080` | Use actual IP/domain |
-
----
+- **Frontend**: http://localhost:3000
+- **EdgeLLM**: http://localhost:8080
 
 ### Demo API Keys
 
-```env
-# Demo Admin Key (for testing)
-DEMO_ADMIN_KEY=demo-admin-key-12345
-
-# Demo User Key (for testing)
-DEMO_USER_KEY=demo-user-key-67890
-```
-
-**Security Warning**:
-- Change these keys in production
-- Leave empty to disable demo keys: `DEMO_ADMIN_KEY=`
-- Generate secure keys: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
-
-**Usage**:
-- Access API: `curl -H "Authorization: Bearer demo-admin-key-12345" http://localhost:8000/api/models`
-- Login frontend: Use key as password on sign-in page
+| Role | Key | Rate Limit |
+|------|-----|------------|
+| Admin | `edgellm-admin-demo-key-12345` | 1000/hr |
+| User | `edgellm-user-demo-key-67890` | 100/hr |
 
 ---
 
-### Frontend Configuration
+## API Usage
 
-```env
-# Backend API URL
-VITE_API_URL=http://localhost:8000
+### Chat Completion
 
-# Frontend Port
-FRONTEND_PORT=3000
-```
-
-**VITE_API_URL**:
-- **Development**: `http://localhost:8000`
-- **Docker**: `http://localhost:8000` or `http://api:8000`
-- **Production**: `https://api.yourdomain.com`
-- **NGINX**: `https://yourdomain.com/api` (with proper proxy config)
-
-**FRONTEND_PORT**:
-- Default: 3000
-- Change if port conflicts
-
----
-
-### Docker Configuration
-
-```env
-# Platform Architecture
-DOCKER_PLATFORM=linux/amd64
-```
-
-**Options**:
-- `linux/amd64` - Intel/AMD processors (default)
-- `linux/arm64` - Apple Silicon (M1/M2/M3)
-
----
-
-## First-Time Setup (Step by Step)
-
-### Step 1: Create Admin Account
 ```bash
-# Option A: Use Demo Admin Key
-curl -X POST http://localhost:8000/api/generate \
-  -H "Authorization: Bearer demo-admin-key-12345" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"smollm-135m","prompt":"hello"}'
-
-# Option B: Create new admin key via API
-curl -X POST http://localhost:8000/api/keys \
-  -H "Authorization: Bearer demo-admin-key-12345" \
+curl -X POST http://localhost:8000/api/chat \
+  -H "Authorization: Bearer edgellm-user-demo-key-67890" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "My Admin Key",
-    "role": "admin",
-    "rate_limit": 1000
+    "model": "smollm-135m",
+    "messages": [
+      {"role": "user", "content": "Hello!"}
+    ]
   }'
 ```
 
-### Step 2: Login to Frontend
-1. Go to http://localhost:3000
-2. Click "Sign In"
-3. Paste your admin API key
-4. Click "Continue"
+### Python
 
-### Step 3: Create User API Keys
-1. Go to Admin Dashboard
-2. Click "Create API Key"
-3. Fill in the form:
-   - **Name**: User description
-   - **Role**: "user" or "admin"
-   - **Rate Limit**: Requests per hour
-4. Copy and save the key securely
+```python
+import requests
 
-### Step 4: Test with Playground
-1. Go to Playground tab
-2. Select a model (e.g., "smollm-135m")
-3. Enter a prompt
-4. Click "Generate"
-5. View response and usage stats
-
----
-
-## API Key Management
-
-### Creating API Keys
-
-**Via Dashboard**:
-1. Admin Dashboard → "Create API Key"
-2. Fill form
-3. Copy key immediately (shown only once)
-
-**Via API**:
-```bash
-curl -X POST http://localhost:8000/api/keys \
-  -H "Authorization: Bearer YOUR_ADMIN_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Production API Key",
-    "role": "user",
-    "rate_limit": 100
-  }'
+response = requests.post(
+    "http://localhost:8000/api/chat",
+    headers={"Authorization": "Bearer edgellm-user-demo-key-67890"},
+    json={
+        "model": "smollm-135m",
+        "messages": [{"role": "user", "content": "Hello!"}]
+    }
+)
+print(response.json())
 ```
 
-### Revoking API Keys
-```bash
-curl -X DELETE http://localhost:8000/api/keys/KEY_PREFIX \
-  -H "Authorization: Bearer YOUR_ADMIN_KEY"
-```
+### JavaScript
 
-### Viewing API Keys
-```bash
-curl http://localhost:8000/api/keys \
-  -H "Authorization: Bearer YOUR_ADMIN_KEY"
+```javascript
+const response = await fetch('http://localhost:8000/api/chat', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer edgellm-user-demo-key-67890',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    model: 'smollm-135m',
+    messages: [{ role: 'user', content: 'Hello!' }]
+  })
+});
 ```
 
 ---
 
-## Admin Dashboard Features
+## Supported Models
 
-### Overview Tab
-- **Total Users**: Count of active API keys
-- **Total Requests**: All-time request count
-- **24h Requests**: Last 24 hours
-- **7d Requests**: Last 7 days
-- **Avg Response Time**: Average across all requests
-- **Top Users Chart**: Bar chart of high-request users
-- **Response Time Chart**: Users with slow response times
-- **Rate Limit Usage**: Current hourly usage per user
-
-### User Analytics Tab
-- **User Statistics Table**: Detailed per-user metrics
-- **Model Usage**: Which models each user accesses
-- **Endpoint Usage**: Which endpoints are most used
-- **Last Active**: When user last made a request
-- **User Cards**: Quick view of top 6 users
-
-### API Keys Tab
-- **List All Keys**: View all active API keys
-- **Show/Hide Key**: Reveal full key with confirmation
-- **Copy Key**: One-click copy to clipboard
-- **Revoke Key**: Deactivate a key
+| Model | Parameters | Size | Use Case |
+|-------|------------|------|----------|
+| `smollm-135m` | 135M | 40 MB | Edge devices, IoT |
+| `qwen2-0.5b` | 500M | 156 MB | General chat |
+| `llama-3.2-1b` | 1B | 312 MB | Complex tasks |
+| `phi-3-mini` | 3.8B | 1.2 GB | High quality |
 
 ---
 
-## Docker Commands Reference
+## Hardware Support
 
-```bash
-# Start all services
-docker compose up -d
+### GPU (CUDA)
 
-# Stop all services
-docker compose down
+| Device | GPU | Expected Speed |
+|--------|-----|----------------|
+| Jetson Nano | Maxwell 128 | 80-120 tok/s |
+| Tesla T4 | Turing 2560 | **1,490 tok/s** |
+| RTX 3090 | Ampere 10496 | 400-600 tok/s |
+| RTX 4090 | Ada 16384 | 600-1000 tok/s |
 
-# View running services
-docker compose ps
+### CPU (Edge)
 
-# View logs
-docker compose logs -f
-
-# Rebuild containers
-docker compose up -d --build
-
-# Rebuild specific service
-docker compose up -d --build backend
-
-# Execute command in container
-docker compose exec edgellm-api-service python -c "import secrets; print(secrets.token_urlsafe(32))"
-
-# Remove volumes (WARNING: deletes database)
-docker compose down -v
-```
+| Device | Price | Expected Speed |
+|--------|-------|----------------|
+| Pi Zero 2 W | **$15** | 5-10 tok/s |
+| Pi 4 | $35 | 8-15 tok/s |
+| Pi 5 | $80 | 20-40 tok/s |
 
 ---
 
-## Troubleshooting
+## Platform Support
 
-### Port Already in Use
+| Platform | Native | Docker |
+|----------|--------|--------|
+| Linux x86_64 | ✅ | ✅ |
+| Linux ARM64 | ✅ | ✅ |
+| macOS ARM64 | ✅ | ✅ |
+| macOS x86_64 | ❌ | ✅ |
+| Windows | ❌ | ✅ (WSL2) |
+
+---
+
+## Development
+
+### Prerequisites
+
+- [Pixi](https://pixi.sh) - Mojo package manager
+- [Docker](https://docker.com) - Container runtime
+- [Node.js 18+](https://nodejs.org) - Frontend
+
+### Build from Source
+
 ```bash
-# Check which process is using the port
-lsof -i :8000
+# Clone
+git clone https://github.com/umerkhan95/EdgeLLM.git
+cd EdgeLLM/mojo-gateway
 
-# Kill the process
-kill -9 <PID>
+# Install dependencies
+pixi install
 
-# Or use different port in .env
+# Build CLI
+pixi run build-cli
+
+# Run
+./bin/edgellm --help
 ```
 
-### Database Connection Failed
+### Run Tests
+
 ```bash
-# Wait for PostgreSQL to be ready
-docker compose logs postgres
+# API tests (Jupyter notebook)
+jupyter notebook notebooks/test_edgellm_api.ipynb
 
-# Reset database
-docker compose down -v
-docker compose up -d
-```
-
-### EdgeLLM Not Found
-```bash
-# Check EdgeLLM is running
-curl http://localhost:8080/health
-
-# Update EDGELLM_BASE_URL in .env
-# Restart containers
-docker compose restart
-```
-
-### Frontend Can't Connect to API
-```bash
-# Check VITE_API_URL in .env
-# Verify backend is running
-curl http://localhost:8000/health
-
-# Check browser console for CORS errors
-# Restart frontend
-docker compose restart frontend
+# Benchmark
+python benchmarks/edgellm_benchmark.py --compare
 ```
 
 ---
 
-## Documentation Files
+## Key Technologies
 
-- **[ENV_CONFIGURATION.md](./ENV_CONFIGURATION.md)** - Detailed environment variables guide
-- **[backend/README.md](./backend/README.md)** - Backend API documentation
-- **[frontend/README.md](./frontend/README.md)** - Frontend setup guide
-- **[mojo-gateway/README.md](./mojo-gateway/README.md)** - EdgeLLM inference engine docs
-- **[API Documentation](http://localhost:8000/docs)** - Interactive Swagger UI
+- **[Mojo](https://www.modular.com/mojo)** - Systems language (no GC)
+- **[BitNet](https://arxiv.org/abs/2402.17764)** - 1.58-bit quantization
+- **[T-MAC](https://arxiv.org/abs/2407.00088)** - Lookup table inference
+- **[FastAPI](https://fastapi.tiangolo.com)** - Async Python API
+- **[React](https://react.dev)** - Frontend UI
+
+---
+
+## Documentation
+
+- [Installation Guide](mojo-gateway/INSTALL.md)
+- [Benchmark Report](mojo-gateway/BENCHMARK_REPORT.md)
+- [API Documentation](http://localhost:8000/docs)
+- [Edge Device Guide](mojo-gateway/EDGE_DEVICE_GUIDE.md)
 
 ---
 
 ## Contributing
 
-Contributions are welcome! Please follow these steps:
+```bash
+# Fork and clone
+git clone https://github.com/YOUR_USERNAME/EdgeLLM.git
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+# Create branch
+git checkout -b feature/amazing-feature
+
+# Make changes and commit
+git commit -m "Add amazing feature"
+
+# Push and create PR
+git push origin feature/amazing-feature
+```
 
 ---
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
-## Support
+## Links
 
-For issues and questions:
-- GitHub Issues: [Report a bug](https://github.com/yourusername/edgellm-api-gateway/issues)
-- Discussions: [Ask a question](https://github.com/yourusername/edgellm-api-gateway/discussions)
-- Documentation: [Read the docs](./ENV_CONFIGURATION.md)
-
----
-
-## Roadmap
-
-- [ ] Multi-model support with load balancing
-- [ ] Advanced analytics and reporting
-- [ ] Webhook notifications for usage alerts
-- [ ] API versioning support
-- [ ] Custom domain and SSL support
-- [ ] Advanced caching mechanisms
+- **GitHub**: https://github.com/umerkhan95/EdgeLLM
+- **Issues**: https://github.com/umerkhan95/EdgeLLM/issues
+- **Discussions**: https://github.com/umerkhan95/EdgeLLM/discussions
 
 ---
 
-**Made with love for the EdgeLLM community**
+<p align="center">
+  <strong>EdgeLLM</strong> — LLM inference for the real world
+</p>
