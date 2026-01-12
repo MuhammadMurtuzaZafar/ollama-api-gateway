@@ -236,6 +236,7 @@ void attention_stateless_cleanup(void);
  *
  * More efficient than attention_stateless_fp32 when making multiple calls.
  * Call attention_stateless_init first, or it will auto-initialize.
+ * NOTE: Expects contiguous [batch_heads, cache_len, head_dim] layout.
  *
  * @param Q           Query [batch_heads, head_dim] - FP32
  * @param K_cache     Key cache [batch_heads, cache_len, head_dim] - FP32
@@ -254,6 +255,33 @@ int attention_stateless_fast(
     int batch_heads,
     int cache_len,
     int head_dim
+);
+
+/**
+ * Strided stateless attention - handles non-contiguous KV cache
+ *
+ * Use when KV cache has layout [batch_heads, max_seq_len, head_dim]
+ * but only cache_len positions are valid.
+ *
+ * @param Q              Query [batch_heads, head_dim] - FP32
+ * @param K_cache        Key cache [batch_heads, buffer_seq_len, head_dim] - FP32
+ * @param V_cache        Value cache [batch_heads, buffer_seq_len, head_dim] - FP32
+ * @param O              Output [batch_heads, head_dim] - FP32
+ * @param batch_heads    Number of batch * heads
+ * @param cache_len      Number of valid positions in cache (used for attention)
+ * @param head_dim       Dimension per head
+ * @param buffer_seq_len Stride between heads in source buffer (typically max_seq_len)
+ * @return 0 on success
+ */
+int attention_stateless_strided(
+    const float* Q,
+    const float* K_cache,
+    const float* V_cache,
+    float* O,
+    int batch_heads,
+    int cache_len,
+    int head_dim,
+    int buffer_seq_len
 );
 
 #ifdef __cplusplus

@@ -1355,6 +1355,7 @@ void attention_stateless_cleanup(void) {
 
 /**
  * Fast stateless attention with reused buffers
+ * NOTE: Expects contiguous [batch_heads, cache_len, head_dim] layout
  */
 int attention_stateless_fast(
     const float* Q,
@@ -1365,9 +1366,32 @@ int attention_stateless_fast(
     int cache_len,
     int head_dim
 ) {
+    // Delegate to strided version with stride = cache_len (contiguous)
+    return attention_stateless_strided(Q, K_cache, V_cache, O,
+                                       batch_heads, cache_len, head_dim, cache_len);
+}
+
+/**
+ * Strided stateless attention - handles non-contiguous KV cache
+ *
+ * Use when KV cache has layout [batch_heads, max_seq_len, head_dim]
+ * but only cache_len positions are valid.
+ *
+ * @param buffer_seq_len  Stride between heads in source buffer (typically max_seq_len)
+ */
+int attention_stateless_strided(
+    const float* Q,
+    const float* K_cache,
+    const float* V_cache,
+    float* O,
+    int batch_heads,
+    int cache_len,
+    int head_dim,
+    int buffer_seq_len
+) {
     if (!attn_stateless_initialized) {
         // Auto-initialize with default sizes
-        int ret = attention_stateless_init(batch_heads, cache_len, head_dim);
+        int ret = attention_stateless_init(batch_heads, buffer_seq_len, head_dim);
         if (ret != 0) return ret;
     }
 
@@ -1375,17 +1399,29 @@ int attention_stateless_fast(
     if (batch_heads > attn_stateless_max_batch_heads ||
         cache_len > attn_stateless_max_cache ||
         head_dim != attn_stateless_head_dim) {
-        fprintf(stderr, "Stateless attention: size mismatch. Re-init with larger buffers.\n");
+        fprintf(stderr, "Stateless attention: size mismatch (heads=%d/%d, cache=%d/%d, dim=%d/%d)\n",
+                batch_heads, attn_stateless_max_batch_heads,
+                cache_len, attn_stateless_max_cache,
+                head_dim, attn_stateless_head_dim);
         return -1;
     }
 
     size_t q_size = batch_heads * head_dim * sizeof(float);
-    size_t kv_size = batch_heads * cache_len * head_dim * sizeof(float);
 
-    // Copy to device
+    // Copy Q (always contiguous)
     CUDA_CHECK(cudaMemcpy(d_attn_Q, Q, q_size, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_attn_K, K_cache, kv_size, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_attn_V, V_cache, kv_size, cudaMemcpyHostToDevice));
+
+    // Copy K, V with stride handling
+    // Source layout: [batch_heads, buffer_seq_len, head_dim]
+    // We need: [batch_heads, cache_len, head_dim] contiguous on device
+    for (int h = 0; h < batch_heads; h++) {
+        size_t src_offset = h * buffer_seq_len * head_dim;
+        size_t dst_offset = h * cache_len * head_dim;
+        size_t copy_size = cache_len * head_dim * sizeof(float);
+
+        CUDA_CHECK(cudaMemcpy(d_attn_K + dst_offset, K_cache + src_offset, copy_size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_attn_V + dst_offset, V_cache + src_offset, copy_size, cudaMemcpyHostToDevice));
+    }
 
     // Quantize
     dim3 qblock(256);

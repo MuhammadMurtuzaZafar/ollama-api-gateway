@@ -614,22 +614,27 @@ struct CUDAInference:
             print("Stateless Attention init failed")
             return False
 
-    fn attention(self,
+    fn attention_strided(self,
                  q_ptr: UnsafePointer[Float32],
                  k_cache_ptr: UnsafePointer[Float32],
                  v_cache_ptr: UnsafePointer[Float32],
                  o_ptr: UnsafePointer[Float32],
                  n_heads: Int,
                  cache_len: Int,
-                 head_dim: Int) -> Int:
-        """Execute stateless attention with external KV cache."""
+                 head_dim: Int,
+                 buffer_seq_len: Int) -> Int:
+        """Execute strided stateless attention with external KV cache.
+
+        Use when KV cache has [n_heads, max_seq_len, head_dim] layout
+        but only cache_len positions are valid.
+        """
         if not self.initialized:
             return -1
 
-        # Use simplified FFI call for Mojo 0.25.7
-        return Int(self.flash_attn.call["attention_stateless_fast", Int32](
+        # Use strided version that handles non-contiguous KV cache
+        return Int(self.flash_attn.call["attention_stateless_strided", Int32](
             q_ptr, k_cache_ptr, v_cache_ptr, o_ptr,
-            Int32(n_heads), Int32(cache_len), Int32(head_dim)))
+            Int32(n_heads), Int32(cache_len), Int32(head_dim), Int32(buffer_seq_len)))
 
     fn cleanup(mut self):
         """Cleanup CUDA resources."""
@@ -718,11 +723,12 @@ fn transformer_forward_cuda(
             var v_cache_ptr = state.value_cache.data.unsafe_ptr() + layer_cache_offset
             var o_ptr = state.xb.data.unsafe_ptr()
 
-            # Call stateless attention - kernel receives external KV cache
+            # Call strided stateless attention - handles [n_heads, seq_len, head_dim] layout
+            # where only (pos+1) positions are valid but stride is seq_len
             # Note: For GQA (n_heads != n_kv_heads), we pass n_kv_heads to kernel
             # and handle head mapping on output side
-            var ret = cuda.attention(q_ptr, k_cache_ptr, v_cache_ptr, o_ptr,
-                                     n_kv_heads, pos + 1, head_size)
+            var ret = cuda.attention_strided(q_ptr, k_cache_ptr, v_cache_ptr, o_ptr,
+                                     n_kv_heads, pos + 1, head_size, seq_len)
 
             if ret != 0:
                 # Fallback to CPU attention if CUDA fails
