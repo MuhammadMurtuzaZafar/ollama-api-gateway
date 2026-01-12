@@ -1166,4 +1166,262 @@ void flash_attention_int8_info(int* initialized, int* max_cache, int* max_bh, in
     if (h_dim) *h_dim = int8_head_dim;
 }
 
+// ============================================================================
+// STATELESS Attention - For Multi-Layer Transformers
+// ============================================================================
+
+/**
+ * Stateless FP32 Attention (no internal caches)
+ *
+ * This is the DETERMINISTIC approach for multi-layer transformers.
+ * The caller (Mojo/C++) owns and manages per-layer KV caches.
+ * The kernel just computes attention - no state management.
+ *
+ * @param Q         Query [batch_heads, head_dim] - FP32
+ * @param K_cache   Key cache [batch_heads, cache_len, head_dim] - FP32, EXTERNAL
+ * @param V_cache   Value cache [batch_heads, cache_len, head_dim] - FP32, EXTERNAL
+ * @param O         Output [batch_heads, head_dim] - FP32
+ * @param batch_heads Number of batch * heads
+ * @param cache_len  Number of valid positions in cache (1 to max_seq_len)
+ * @param head_dim   Dimension per head
+ * @return 0 on success
+ */
+int attention_stateless_fp32(
+    const float* Q,
+    const float* K_cache,
+    const float* V_cache,
+    float* O,
+    int batch_heads,
+    int cache_len,
+    int head_dim
+) {
+    if (cache_len <= 0 || batch_heads <= 0 || head_dim <= 0) {
+        return -1;
+    }
+
+    // Allocate device memory
+    float* d_Q;
+    float* d_K;
+    float* d_V;
+    float* d_O;
+
+    size_t q_size = batch_heads * head_dim * sizeof(float);
+    size_t kv_size = batch_heads * cache_len * head_dim * sizeof(float);
+
+    CUDA_CHECK(cudaMalloc(&d_Q, q_size));
+    CUDA_CHECK(cudaMalloc(&d_K, kv_size));
+    CUDA_CHECK(cudaMalloc(&d_V, kv_size));
+    CUDA_CHECK(cudaMalloc(&d_O, q_size));
+
+    // Copy inputs to device
+    CUDA_CHECK(cudaMemcpy(d_Q, Q, q_size, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_K, K_cache, kv_size, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_V, V_cache, kv_size, cudaMemcpyHostToDevice));
+
+    // Quantize to INT8
+    int8_t* d_Q_i8;
+    int8_t* d_K_i8;
+    int8_t* d_V_i8;
+    float* d_scale_q;
+    float* d_scale_k;
+    float* d_scale_v;
+
+    CUDA_CHECK(cudaMalloc(&d_Q_i8, batch_heads * head_dim));
+    CUDA_CHECK(cudaMalloc(&d_K_i8, batch_heads * cache_len * head_dim));
+    CUDA_CHECK(cudaMalloc(&d_V_i8, batch_heads * cache_len * head_dim));
+    CUDA_CHECK(cudaMalloc(&d_scale_q, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_scale_k, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_scale_v, sizeof(float)));
+
+    dim3 qblock(256);
+    dim3 qgrid_q((batch_heads * head_dim + 255) / 256);
+    dim3 qgrid_kv((batch_heads * cache_len * head_dim + 255) / 256);
+
+    quantize_fp32_to_int8_kernel<<<qgrid_q, qblock>>>(d_Q, d_Q_i8, d_scale_q, batch_heads * head_dim);
+    quantize_fp32_to_int8_kernel<<<qgrid_kv, qblock>>>(d_K, d_K_i8, d_scale_k, batch_heads * cache_len * head_dim);
+    quantize_fp32_to_int8_kernel<<<qgrid_kv, qblock>>>(d_V, d_V_i8, d_scale_v, batch_heads * cache_len * head_dim);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Get scales
+    float h_scale_q, h_scale_k, h_scale_v;
+    CUDA_CHECK(cudaMemcpy(&h_scale_q, d_scale_q, sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&h_scale_k, d_scale_k, sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&h_scale_v, d_scale_v, sizeof(float), cudaMemcpyDeviceToHost));
+
+    float attn_scale = 1.0f / sqrtf((float)head_dim);
+
+    // Shared memory size
+    size_t scores_size = ((cache_len + 15) / 16 * 16) * sizeof(float);
+    size_t q_packed_size = ((head_dim / 4) + 3) / 4 * 4 * sizeof(int);
+    size_t smem_size = scores_size + q_packed_size;
+
+    dim3 grid(batch_heads);
+    dim3 block(TC_THREADS);
+
+    // Run INT8 attention kernel (using external K/V caches)
+    flash_attention_int8_decode_kernel<<<grid, block, smem_size>>>(
+        d_Q_i8, d_K_i8, d_V_i8, d_O,
+        h_scale_q, h_scale_k, h_scale_v,
+        cache_len, head_dim, attn_scale
+    );
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Copy result back
+    CUDA_CHECK(cudaMemcpy(O, d_O, q_size, cudaMemcpyDeviceToHost));
+
+    // Cleanup
+    cudaFree(d_Q);
+    cudaFree(d_K);
+    cudaFree(d_V);
+    cudaFree(d_O);
+    cudaFree(d_Q_i8);
+    cudaFree(d_K_i8);
+    cudaFree(d_V_i8);
+    cudaFree(d_scale_q);
+    cudaFree(d_scale_k);
+    cudaFree(d_scale_v);
+
+    return 0;
+}
+
+/**
+ * Stateless FP32 Attention with pre-allocated GPU buffers
+ *
+ * More efficient version that reuses GPU memory across calls.
+ * Call attention_stateless_init() first to allocate buffers.
+ */
+static float* d_attn_Q = nullptr;
+static float* d_attn_K = nullptr;
+static float* d_attn_V = nullptr;
+static float* d_attn_O = nullptr;
+static int8_t* d_attn_Q_i8 = nullptr;
+static int8_t* d_attn_K_i8 = nullptr;
+static int8_t* d_attn_V_i8 = nullptr;
+static int attn_stateless_max_batch_heads = 0;
+static int attn_stateless_max_cache = 0;
+static int attn_stateless_head_dim = 0;
+static int attn_stateless_initialized = 0;
+
+int attention_stateless_init(int max_batch_heads, int max_cache_len, int head_dim) {
+    if (attn_stateless_initialized) {
+        // Already initialized - check if we need to resize
+        if (max_batch_heads <= attn_stateless_max_batch_heads &&
+            max_cache_len <= attn_stateless_max_cache &&
+            head_dim == attn_stateless_head_dim) {
+            return 0;  // Existing buffers are sufficient
+        }
+        // Need to resize - cleanup first
+        if (d_attn_Q) cudaFree(d_attn_Q);
+        if (d_attn_K) cudaFree(d_attn_K);
+        if (d_attn_V) cudaFree(d_attn_V);
+        if (d_attn_O) cudaFree(d_attn_O);
+        if (d_attn_Q_i8) cudaFree(d_attn_Q_i8);
+        if (d_attn_K_i8) cudaFree(d_attn_K_i8);
+        if (d_attn_V_i8) cudaFree(d_attn_V_i8);
+    }
+
+    size_t q_size = max_batch_heads * head_dim * sizeof(float);
+    size_t kv_size = max_batch_heads * max_cache_len * head_dim * sizeof(float);
+
+    CUDA_CHECK(cudaMalloc(&d_attn_Q, q_size));
+    CUDA_CHECK(cudaMalloc(&d_attn_K, kv_size));
+    CUDA_CHECK(cudaMalloc(&d_attn_V, kv_size));
+    CUDA_CHECK(cudaMalloc(&d_attn_O, q_size));
+    CUDA_CHECK(cudaMalloc(&d_attn_Q_i8, max_batch_heads * head_dim));
+    CUDA_CHECK(cudaMalloc(&d_attn_K_i8, max_batch_heads * max_cache_len * head_dim));
+    CUDA_CHECK(cudaMalloc(&d_attn_V_i8, max_batch_heads * max_cache_len * head_dim));
+
+    attn_stateless_max_batch_heads = max_batch_heads;
+    attn_stateless_max_cache = max_cache_len;
+    attn_stateless_head_dim = head_dim;
+    attn_stateless_initialized = 1;
+
+    printf("Stateless attention initialized: batch_heads=%d, cache=%d, head_dim=%d\n",
+           max_batch_heads, max_cache_len, head_dim);
+
+    return 0;
+}
+
+void attention_stateless_cleanup(void) {
+    if (d_attn_Q) { cudaFree(d_attn_Q); d_attn_Q = nullptr; }
+    if (d_attn_K) { cudaFree(d_attn_K); d_attn_K = nullptr; }
+    if (d_attn_V) { cudaFree(d_attn_V); d_attn_V = nullptr; }
+    if (d_attn_O) { cudaFree(d_attn_O); d_attn_O = nullptr; }
+    if (d_attn_Q_i8) { cudaFree(d_attn_Q_i8); d_attn_Q_i8 = nullptr; }
+    if (d_attn_K_i8) { cudaFree(d_attn_K_i8); d_attn_K_i8 = nullptr; }
+    if (d_attn_V_i8) { cudaFree(d_attn_V_i8); d_attn_V_i8 = nullptr; }
+    attn_stateless_initialized = 0;
+}
+
+/**
+ * Fast stateless attention with reused buffers
+ */
+int attention_stateless_fast(
+    const float* Q,
+    const float* K_cache,
+    const float* V_cache,
+    float* O,
+    int batch_heads,
+    int cache_len,
+    int head_dim
+) {
+    if (!attn_stateless_initialized) {
+        // Auto-initialize with default sizes
+        int ret = attention_stateless_init(batch_heads, cache_len, head_dim);
+        if (ret != 0) return ret;
+    }
+
+    // Validate sizes
+    if (batch_heads > attn_stateless_max_batch_heads ||
+        cache_len > attn_stateless_max_cache ||
+        head_dim != attn_stateless_head_dim) {
+        fprintf(stderr, "Stateless attention: size mismatch. Re-init with larger buffers.\n");
+        return -1;
+    }
+
+    size_t q_size = batch_heads * head_dim * sizeof(float);
+    size_t kv_size = batch_heads * cache_len * head_dim * sizeof(float);
+
+    // Copy to device
+    CUDA_CHECK(cudaMemcpy(d_attn_Q, Q, q_size, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_attn_K, K_cache, kv_size, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_attn_V, V_cache, kv_size, cudaMemcpyHostToDevice));
+
+    // Quantize
+    dim3 qblock(256);
+    dim3 qgrid_q((batch_heads * head_dim + 255) / 256);
+    dim3 qgrid_kv((batch_heads * cache_len * head_dim + 255) / 256);
+
+    float* d_scale;
+    CUDA_CHECK(cudaMalloc(&d_scale, 3 * sizeof(float)));
+
+    quantize_fp32_to_int8_kernel<<<qgrid_q, qblock>>>(d_attn_Q, d_attn_Q_i8, d_scale, batch_heads * head_dim);
+    quantize_fp32_to_int8_kernel<<<qgrid_kv, qblock>>>(d_attn_K, d_attn_K_i8, d_scale + 1, batch_heads * cache_len * head_dim);
+    quantize_fp32_to_int8_kernel<<<qgrid_kv, qblock>>>(d_attn_V, d_attn_V_i8, d_scale + 2, batch_heads * cache_len * head_dim);
+
+    float h_scales[3];
+    CUDA_CHECK(cudaMemcpy(h_scales, d_scale, 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    cudaFree(d_scale);
+
+    float attn_scale = 1.0f / sqrtf((float)head_dim);
+
+    size_t scores_size = ((cache_len + 15) / 16 * 16) * sizeof(float);
+    size_t q_packed_size = ((head_dim / 4) + 3) / 4 * 4 * sizeof(int);
+    size_t smem_size = scores_size + q_packed_size;
+
+    dim3 grid(batch_heads);
+    dim3 block(TC_THREADS);
+
+    flash_attention_int8_decode_kernel<<<grid, block, smem_size>>>(
+        d_attn_Q_i8, d_attn_K_i8, d_attn_V_i8, d_attn_O,
+        h_scales[0], h_scales[1], h_scales[2],
+        cache_len, head_dim, attn_scale
+    );
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(O, d_attn_O, q_size, cudaMemcpyDeviceToHost));
+
+    return 0;
+}
+
 } // extern "C"

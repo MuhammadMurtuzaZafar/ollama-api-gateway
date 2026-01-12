@@ -182,6 +182,80 @@ int flash_attention_int8_decode_gpu(
  */
 void flash_attention_int8_sync(void);
 
+// ============================================================================
+// STATELESS Attention API (for Multi-Layer Transformers)
+// ============================================================================
+
+/**
+ * Stateless FP32 Attention (no internal caches)
+ *
+ * DETERMINISTIC approach for multi-layer transformers.
+ * The caller (Mojo/C++) owns and manages per-layer KV caches.
+ * The kernel just computes attention - no state management.
+ *
+ * This is the recommended API for production inference engines.
+ *
+ * @param Q           Query [batch_heads, head_dim] - FP32
+ * @param K_cache     Key cache [batch_heads, cache_len, head_dim] - FP32, EXTERNAL
+ * @param V_cache     Value cache [batch_heads, cache_len, head_dim] - FP32, EXTERNAL
+ * @param O           Output [batch_heads, head_dim] - FP32
+ * @param batch_heads Number of batch * heads
+ * @param cache_len   Number of valid positions in cache (1 to max_seq_len)
+ * @param head_dim    Dimension per head
+ * @return 0 on success
+ */
+int attention_stateless_fp32(
+    const float* Q,
+    const float* K_cache,
+    const float* V_cache,
+    float* O,
+    int batch_heads,
+    int cache_len,
+    int head_dim
+);
+
+/**
+ * Initialize stateless attention buffers
+ *
+ * Call once at start. Reuses GPU memory across calls for better performance.
+ *
+ * @param max_batch_heads  Maximum batch * num_heads
+ * @param max_cache_len    Maximum KV cache length
+ * @param head_dim         Head dimension (must be multiple of 4)
+ * @return 0 on success
+ */
+int attention_stateless_init(int max_batch_heads, int max_cache_len, int head_dim);
+
+/**
+ * Cleanup stateless attention buffers
+ */
+void attention_stateless_cleanup(void);
+
+/**
+ * Fast stateless attention with reused buffers
+ *
+ * More efficient than attention_stateless_fp32 when making multiple calls.
+ * Call attention_stateless_init first, or it will auto-initialize.
+ *
+ * @param Q           Query [batch_heads, head_dim] - FP32
+ * @param K_cache     Key cache [batch_heads, cache_len, head_dim] - FP32
+ * @param V_cache     Value cache [batch_heads, cache_len, head_dim] - FP32
+ * @param O           Output [batch_heads, head_dim] - FP32
+ * @param batch_heads Number of batch * heads
+ * @param cache_len   Number of valid positions in cache
+ * @param head_dim    Dimension per head
+ * @return 0 on success
+ */
+int attention_stateless_fast(
+    const float* Q,
+    const float* K_cache,
+    const float* V_cache,
+    float* O,
+    int batch_heads,
+    int cache_len,
+    int head_dim
+);
+
 #ifdef __cplusplus
 }
 #endif
