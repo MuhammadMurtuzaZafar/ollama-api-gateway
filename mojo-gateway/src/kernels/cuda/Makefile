@@ -88,9 +88,15 @@ $(FA_TARGET): flash_attention.o
 flash: dirs $(TARGET) $(FA_TARGET)
 	@echo "Built all CUDA kernels including Flash Attention"
 
-# INT8 Tensor Core Flash Attention (requires sm_75+)
+# INT8 Tensor Core Flash Attention (requires sm_75+ for WMMA)
+# Use separate arch flags that only include Turing+ GPUs
+INT8_CUDA_ARCH = -gencode arch=compute_75,code=sm_75 \
+                 -gencode arch=compute_86,code=sm_86 \
+                 -gencode arch=compute_89,code=sm_89
+INT8_NVCC_FLAGS = $(NVCC_FLAGS_COMMON) $(INT8_CUDA_ARCH)
+
 flash_attention_int8.o: flash_attention_int8.cu flash_attention_int8.h
-	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
+	$(NVCC) $(INT8_NVCC_FLAGS) -c $< -o $@
 
 $(INT8_TARGET): flash_attention_int8.o
 	$(NVCC) $(SHARED_FLAGS) -o $@ $^ -lcudart
@@ -179,9 +185,16 @@ $(RMSNORM_TARGET): rmsnorm_kernel.o
 rmsnorm: dirs $(RMSNORM_TARGET)
 	@echo "Built RMSNorm kernel"
 
-# FFN/MLP kernel (SwiGLU)
+# FFN/MLP kernel (SwiGLU) - uses __dp4a which requires sm_61+
+# Define DP4A-compatible architectures
+DP4A_CUDA_ARCH = -gencode arch=compute_61,code=sm_61 \
+                 -gencode arch=compute_70,code=sm_70 \
+                 -gencode arch=compute_75,code=sm_75 \
+                 -gencode arch=compute_86,code=sm_86
+DP4A_NVCC_FLAGS = $(NVCC_FLAGS_COMMON) $(DP4A_CUDA_ARCH)
+
 ffn_kernel.o: ffn_kernel.cu ffn_kernel.h
-	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
+	$(NVCC) $(DP4A_NVCC_FLAGS) -c $< -o $@
 
 $(FFN_TARGET): ffn_kernel.o
 	$(NVCC) $(SHARED_FLAGS) -o $@ $^ -lcudart
