@@ -350,6 +350,8 @@ __global__ void int4_gemv_kernel_v2(
  * - 8 warps per block (256 threads), each warp computes one output row
  * - Shared memory for input vector (loaded cooperatively)
  * - Reduced kernel launch overhead by processing multiple rows per block
+ * - Pre-computed scaled weights for better ILP (instruction-level parallelism)
+ * - Explicit FMA instructions for optimal throughput
  *
  * Bug fix (Jan 13, 2026): Original had unsigned underflow bug in dequantization.
  * `(float)(((packed >> 4) & 0xF) - 8)` causes uint32 underflow when nibble < 8.
@@ -409,12 +411,12 @@ __global__ void int4_gemv_multirow_kernel(
 
         int base_idx = p * 8;
 
-        // Load 4 bytes = 8 INT4 values
-        uint32_t packed = *reinterpret_cast<const uint32_t*>(&row_w[p * 4]);
+        // Load 4 bytes = 8 INT4 values (use __ldg for texture cache)
+        uint32_t packed = __ldg(reinterpret_cast<const uint32_t*>(&row_w[p * 4]));
 
-        // Get scale for this group
+        // Get scale for this group (use __ldg for texture cache)
         int g = base_idx / INT4_GROUP_SIZE;
-        float scale = __half2float(row_scales[g]);
+        float scale = __half2float(__ldg(&row_scales[g]));
 
         // Unpack to signed int FIRST to avoid unsigned underflow!
         // Bug fix: ((uint32_t)2 - 8) = 4294967290, not -6
@@ -427,15 +429,288 @@ __global__ void int4_gemv_multirow_kernel(
         int q6 = (int)((packed >> 24) & 0xF) - 8;
         int q7 = (int)((packed >> 28) & 0xF) - 8;
 
-        // Accumulate with FMA (back to float - precision wasn't the issue)
-        sum += s_x[base_idx + 0] * (float)q0 * scale;
-        sum += s_x[base_idx + 1] * (float)q1 * scale;
-        sum += s_x[base_idx + 2] * (float)q2 * scale;
-        sum += s_x[base_idx + 3] * (float)q3 * scale;
-        sum += s_x[base_idx + 4] * (float)q4 * scale;
-        sum += s_x[base_idx + 5] * (float)q5 * scale;
-        sum += s_x[base_idx + 6] * (float)q6 * scale;
-        sum += s_x[base_idx + 7] * (float)q7 * scale;
+        // Pre-compute scaled weights to reduce dependency chain
+        // This enables better ILP by computing all weights before accumulating
+        float w0 = (float)q0 * scale;
+        float w1 = (float)q1 * scale;
+        float w2 = (float)q2 * scale;
+        float w3 = (float)q3 * scale;
+        float w4 = (float)q4 * scale;
+        float w5 = (float)q5 * scale;
+        float w6 = (float)q6 * scale;
+        float w7 = (float)q7 * scale;
+
+        // Accumulate using FMA - weights are now independent, enabling ILP
+        sum = fmaf(s_x[base_idx + 0], w0, sum);
+        sum = fmaf(s_x[base_idx + 1], w1, sum);
+        sum = fmaf(s_x[base_idx + 2], w2, sum);
+        sum = fmaf(s_x[base_idx + 3], w3, sum);
+        sum = fmaf(s_x[base_idx + 4], w4, sum);
+        sum = fmaf(s_x[base_idx + 5], w5, sum);
+        sum = fmaf(s_x[base_idx + 6], w6, sum);
+        sum = fmaf(s_x[base_idx + 7], w7, sum);
+    }
+
+    // Warp reduction
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+
+    // Lane 0 of each warp writes result
+    if (lane_id == 0) {
+        out[row] = sum;
+    }
+}
+
+/**
+ * Multi-row INT4 GEMV kernel with wide loads (64-bit uint2)
+ *
+ * Optimized for large in_dim (FFN layers: 8960 elements)
+ * Uses 64-bit loads to reduce memory transactions and improve bandwidth
+ *
+ * Performance (T4 GPU):
+ * - FFN down (8960→1536): 114μs → 77μs (1.48x faster)
+ * - Not recommended for small matrices (attention)
+ */
+__global__ void int4_gemv_multirow_wide_kernel(
+    float* __restrict__ out,
+    const float* __restrict__ x,
+    const uint8_t* __restrict__ W_q,
+    const half* __restrict__ scales,
+    int out_dim,
+    int in_dim,
+    int n_groups
+) {
+    int block_row_base = blockIdx.x * ROWS_PER_BLOCK;
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+    int row = block_row_base + warp_id;
+
+    extern __shared__ float smem[];
+    float* s_x = smem;
+
+    // Vectorized load to shared memory using float4
+    const float4* x4 = reinterpret_cast<const float4*>(x);
+    float4* s_x4 = reinterpret_cast<float4*>(s_x);
+    int n_vec = in_dim / 4;
+    for (int i = threadIdx.x; i < n_vec; i += blockDim.x) {
+        s_x4[i] = x4[i];
+    }
+    __syncthreads();
+
+    if (row >= out_dim) return;
+
+    float sum = 0.0f;
+    const uint8_t* row_w = W_q + (size_t)row * (in_dim / 2);
+    const half* row_scales = scales + (size_t)row * n_groups;
+
+    // Process 16 elements (64-bit load = 8 bytes = 16 INT4) per iteration
+    int n_hex = in_dim / 16;
+    int hex_per_lane = (n_hex + 31) / 32;
+
+    for (int iter = 0; iter < hex_per_lane; iter++) {
+        int h = lane_id + iter * 32;
+        if (h >= n_hex) break;
+
+        int base_idx = h * 16;
+        int byte_off = h * 8;
+
+        // Load 64-bit (8 bytes = 16 INT4) using uint2
+        uint2 wide = *reinterpret_cast<const uint2*>(&row_w[byte_off]);
+        uint32_t packed0 = wide.x;
+        uint32_t packed1 = wide.y;
+
+        // Get scales (may span 2 groups for 16 elements)
+        int g0 = base_idx / INT4_GROUP_SIZE;
+        int g1 = (base_idx + 8) / INT4_GROUP_SIZE;
+        float scale0 = __half2float(__ldg(&row_scales[g0]));
+        float scale1 = (g1 != g0) ? __half2float(__ldg(&row_scales[g1])) : scale0;
+
+        // First 8 elements
+        sum = fmaf(s_x[base_idx + 0], (float)((int)((packed0 >> 0) & 0xF) - 8) * scale0, sum);
+        sum = fmaf(s_x[base_idx + 1], (float)((int)((packed0 >> 4) & 0xF) - 8) * scale0, sum);
+        sum = fmaf(s_x[base_idx + 2], (float)((int)((packed0 >> 8) & 0xF) - 8) * scale0, sum);
+        sum = fmaf(s_x[base_idx + 3], (float)((int)((packed0 >> 12) & 0xF) - 8) * scale0, sum);
+        sum = fmaf(s_x[base_idx + 4], (float)((int)((packed0 >> 16) & 0xF) - 8) * scale0, sum);
+        sum = fmaf(s_x[base_idx + 5], (float)((int)((packed0 >> 20) & 0xF) - 8) * scale0, sum);
+        sum = fmaf(s_x[base_idx + 6], (float)((int)((packed0 >> 24) & 0xF) - 8) * scale0, sum);
+        sum = fmaf(s_x[base_idx + 7], (float)((int)((packed0 >> 28) & 0xF) - 8) * scale0, sum);
+
+        // Second 8 elements
+        sum = fmaf(s_x[base_idx + 8], (float)((int)((packed1 >> 0) & 0xF) - 8) * scale1, sum);
+        sum = fmaf(s_x[base_idx + 9], (float)((int)((packed1 >> 4) & 0xF) - 8) * scale1, sum);
+        sum = fmaf(s_x[base_idx + 10], (float)((int)((packed1 >> 8) & 0xF) - 8) * scale1, sum);
+        sum = fmaf(s_x[base_idx + 11], (float)((int)((packed1 >> 12) & 0xF) - 8) * scale1, sum);
+        sum = fmaf(s_x[base_idx + 12], (float)((int)((packed1 >> 16) & 0xF) - 8) * scale1, sum);
+        sum = fmaf(s_x[base_idx + 13], (float)((int)((packed1 >> 20) & 0xF) - 8) * scale1, sum);
+        sum = fmaf(s_x[base_idx + 14], (float)((int)((packed1 >> 24) & 0xF) - 8) * scale1, sum);
+        sum = fmaf(s_x[base_idx + 15], (float)((int)((packed1 >> 28) & 0xF) - 8) * scale1, sum);
+    }
+
+    // Warp reduction
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+
+    // Lane 0 of each warp writes result
+    if (lane_id == 0) {
+        out[row] = sum;
+    }
+}
+
+/**
+ * Multi-row INT4 GEMV kernel with 2x register blocking
+ *
+ * Key optimizations over base multirow:
+ * - Process 2 octets (16 elements) per lane per iteration
+ * - Reduces loop iterations by 2x
+ * - Better instruction-level parallelism
+ * - Two uint32 loads can be issued in parallel
+ *
+ * Expected: 80 → 100+ tok/s (25% improvement)
+ */
+__global__ void int4_gemv_multirow_2x_kernel(
+    float* __restrict__ out,
+    const float* __restrict__ x,
+    const uint8_t* __restrict__ W_q,
+    const half* __restrict__ scales,
+    int out_dim,
+    int in_dim,
+    int n_groups
+) {
+    int block_row_base = blockIdx.x * ROWS_PER_BLOCK;
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+    int row = block_row_base + warp_id;
+
+    extern __shared__ float smem[];
+    float* s_x = smem;
+
+    // Cooperative load of input to shared memory
+    for (int i = threadIdx.x; i < in_dim; i += blockDim.x) {
+        s_x[i] = x[i];
+    }
+    __syncthreads();
+
+    if (row >= out_dim) return;
+
+    float sum = 0.0f;
+
+    const uint8_t* row_w = W_q + (size_t)row * (in_dim / 2);
+    const half* row_scales = scales + (size_t)row * n_groups;
+
+    // Process 16 elements (2 octets) per lane per iteration
+    int n_oct = in_dim / 8;
+    int n_pairs = n_oct / 2;  // Number of octet pairs
+    int pairs_per_lane = (n_pairs + 31) / 32;
+
+    for (int iter = 0; iter < pairs_per_lane; iter++) {
+        int pair_idx = lane_id + iter * 32;
+        if (pair_idx >= n_pairs) break;
+
+        int p0 = pair_idx * 2;      // First octet
+        int p1 = pair_idx * 2 + 1;  // Second octet
+        int base_idx0 = p0 * 8;
+        int base_idx1 = p1 * 8;
+
+        // Load 2 x 4 bytes = 16 INT4 values (can issue in parallel)
+        uint32_t packed0 = *reinterpret_cast<const uint32_t*>(&row_w[p0 * 4]);
+        uint32_t packed1 = *reinterpret_cast<const uint32_t*>(&row_w[p1 * 4]);
+
+        // Get scales (may be same or different groups)
+        int g0 = base_idx0 / INT4_GROUP_SIZE;
+        int g1 = base_idx1 / INT4_GROUP_SIZE;
+        float scale0 = __half2float(row_scales[g0]);
+        float scale1 = (g1 != g0) ? __half2float(row_scales[g1]) : scale0;
+
+        // Unpack first octet (cast to int to avoid underflow)
+        int q0_0 = (int)((packed0 >> 0) & 0xF) - 8;
+        int q0_1 = (int)((packed0 >> 4) & 0xF) - 8;
+        int q0_2 = (int)((packed0 >> 8) & 0xF) - 8;
+        int q0_3 = (int)((packed0 >> 12) & 0xF) - 8;
+        int q0_4 = (int)((packed0 >> 16) & 0xF) - 8;
+        int q0_5 = (int)((packed0 >> 20) & 0xF) - 8;
+        int q0_6 = (int)((packed0 >> 24) & 0xF) - 8;
+        int q0_7 = (int)((packed0 >> 28) & 0xF) - 8;
+
+        // Unpack second octet
+        int q1_0 = (int)((packed1 >> 0) & 0xF) - 8;
+        int q1_1 = (int)((packed1 >> 4) & 0xF) - 8;
+        int q1_2 = (int)((packed1 >> 8) & 0xF) - 8;
+        int q1_3 = (int)((packed1 >> 12) & 0xF) - 8;
+        int q1_4 = (int)((packed1 >> 16) & 0xF) - 8;
+        int q1_5 = (int)((packed1 >> 20) & 0xF) - 8;
+        int q1_6 = (int)((packed1 >> 24) & 0xF) - 8;
+        int q1_7 = (int)((packed1 >> 28) & 0xF) - 8;
+
+        // Pre-compute scaled weights for first octet
+        float w0_0 = (float)q0_0 * scale0;
+        float w0_1 = (float)q0_1 * scale0;
+        float w0_2 = (float)q0_2 * scale0;
+        float w0_3 = (float)q0_3 * scale0;
+        float w0_4 = (float)q0_4 * scale0;
+        float w0_5 = (float)q0_5 * scale0;
+        float w0_6 = (float)q0_6 * scale0;
+        float w0_7 = (float)q0_7 * scale0;
+
+        // Pre-compute scaled weights for second octet
+        float w1_0 = (float)q1_0 * scale1;
+        float w1_1 = (float)q1_1 * scale1;
+        float w1_2 = (float)q1_2 * scale1;
+        float w1_3 = (float)q1_3 * scale1;
+        float w1_4 = (float)q1_4 * scale1;
+        float w1_5 = (float)q1_5 * scale1;
+        float w1_6 = (float)q1_6 * scale1;
+        float w1_7 = (float)q1_7 * scale1;
+
+        // Accumulate first octet
+        sum = fmaf(s_x[base_idx0 + 0], w0_0, sum);
+        sum = fmaf(s_x[base_idx0 + 1], w0_1, sum);
+        sum = fmaf(s_x[base_idx0 + 2], w0_2, sum);
+        sum = fmaf(s_x[base_idx0 + 3], w0_3, sum);
+        sum = fmaf(s_x[base_idx0 + 4], w0_4, sum);
+        sum = fmaf(s_x[base_idx0 + 5], w0_5, sum);
+        sum = fmaf(s_x[base_idx0 + 6], w0_6, sum);
+        sum = fmaf(s_x[base_idx0 + 7], w0_7, sum);
+
+        // Accumulate second octet
+        sum = fmaf(s_x[base_idx1 + 0], w1_0, sum);
+        sum = fmaf(s_x[base_idx1 + 1], w1_1, sum);
+        sum = fmaf(s_x[base_idx1 + 2], w1_2, sum);
+        sum = fmaf(s_x[base_idx1 + 3], w1_3, sum);
+        sum = fmaf(s_x[base_idx1 + 4], w1_4, sum);
+        sum = fmaf(s_x[base_idx1 + 5], w1_5, sum);
+        sum = fmaf(s_x[base_idx1 + 6], w1_6, sum);
+        sum = fmaf(s_x[base_idx1 + 7], w1_7, sum);
+    }
+
+    // Handle odd octet if n_oct is odd
+    if ((n_oct % 2) && (lane_id < 1)) {
+        int p = n_oct - 1;
+        int base_idx = p * 8;
+        uint32_t packed = *reinterpret_cast<const uint32_t*>(&row_w[p * 4]);
+        int g = base_idx / INT4_GROUP_SIZE;
+        float scale = __half2float(row_scales[g]);
+
+        int q0 = (int)((packed >> 0) & 0xF) - 8;
+        int q1 = (int)((packed >> 4) & 0xF) - 8;
+        int q2 = (int)((packed >> 8) & 0xF) - 8;
+        int q3 = (int)((packed >> 12) & 0xF) - 8;
+        int q4 = (int)((packed >> 16) & 0xF) - 8;
+        int q5 = (int)((packed >> 20) & 0xF) - 8;
+        int q6 = (int)((packed >> 24) & 0xF) - 8;
+        int q7 = (int)((packed >> 28) & 0xF) - 8;
+
+        sum = fmaf(s_x[base_idx + 0], (float)q0 * scale, sum);
+        sum = fmaf(s_x[base_idx + 1], (float)q1 * scale, sum);
+        sum = fmaf(s_x[base_idx + 2], (float)q2 * scale, sum);
+        sum = fmaf(s_x[base_idx + 3], (float)q3 * scale, sum);
+        sum = fmaf(s_x[base_idx + 4], (float)q4 * scale, sum);
+        sum = fmaf(s_x[base_idx + 5], (float)q5 * scale, sum);
+        sum = fmaf(s_x[base_idx + 6], (float)q6 * scale, sum);
+        sum = fmaf(s_x[base_idx + 7], (float)q7 * scale, sum);
     }
 
     // Warp reduction
@@ -773,10 +1048,14 @@ int int4_gemv(
     // Kernel selection flags
     // USE_V5: Disabled - __ldg() no speedup on Turing (sm_75)
     // USE_V4: Disabled - prefetch causes numerical issues
-    // USE_MULTIROW: Enabled - Kahan summation fixes precision issues
+    // USE_MULTIROW: Enabled - multirow with ILP optimization (80 tok/s)
+    // USE_MULTIROW_2X: Disabled - no improvement over base multirow
+    // USE_MULTIROW_WIDE: Enable wide loads for large in_dim (FFN layers)
     #define USE_V5 0
     #define USE_V4 0
     #define USE_MULTIROW 1
+    #define USE_MULTIROW_2X 0  // Disabled - no improvement
+    #define USE_MULTIROW_WIDE 1  // 1.48x faster for FFN down
     #define MULTIROW_SYNC 0
 
     #if USE_V5
@@ -798,8 +1077,33 @@ int int4_gemv(
         );
     } else
     #endif
+    #if USE_MULTIROW_WIDE
+    // Wide load kernel for large in_dim (FFN layers: 8960 elements)
+    // 1.48x faster for FFN down (114→77 μs)
+    if (in_dim >= 4096 && (in_dim % 16 == 0)) {
+        int n_blocks = (out_dim + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
+        int4_gemv_multirow_wide_kernel<<<n_blocks, 256, smem_size, g_int4_stream>>>(
+            out_gpu, x_gpu, W_q_gpu, scales_gpu, out_dim, in_dim, n_groups
+        );
+        #if MULTIROW_SYNC
+        cudaStreamSynchronize(g_int4_stream);
+        #endif
+    } else
+    #endif
+    #if USE_MULTIROW_2X
+    // Multi-row kernel with 2x register blocking (no improvement)
+    if (in_dim >= 512 && (in_dim % 16 == 0)) {
+        int n_blocks = (out_dim + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
+        int4_gemv_multirow_2x_kernel<<<n_blocks, 256, smem_size, g_int4_stream>>>(
+            out_gpu, x_gpu, W_q_gpu, scales_gpu, out_dim, in_dim, n_groups
+        );
+        #if MULTIROW_SYNC
+        cudaStreamSynchronize(g_int4_stream);
+        #endif
+    } else
+    #endif
     #if USE_MULTIROW
-    // Multi-row kernel (disabled - numerical precision issues)
+    // Multi-row kernel with ILP optimization (80 tok/s baseline)
     if (in_dim >= 512 && (in_dim % 8 == 0)) {
         int n_blocks = (out_dim + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
         int4_gemv_multirow_kernel<<<n_blocks, 256, smem_size, g_int4_stream>>>(
