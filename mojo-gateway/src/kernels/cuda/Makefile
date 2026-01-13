@@ -306,9 +306,53 @@ $(CUBLAS_TARGET): cublas_matmul.o
 cublas: dirs cublas_matmul.o $(CUBLAS_TARGET)
 	@echo "Built cuBLAS full GPU inference kernel (400+ tok/s target)"
 
+# =============================================================================
+# INT4 Quantized Inference (Target: 400+ tok/s)
+# =============================================================================
+# INT4 dequant + GEMV kernel for 8x memory bandwidth reduction
+# Uses GROUP_SIZE=128 (AWQ-style) quantization
+
+INT4_TARGET = $(LIB_DIR)/libint4_gemv.$(SHARED_EXT)
+
+int4_gemv.o: int4_gemv.cu int4_gemv.h
+	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
+
+$(INT4_TARGET): int4_gemv.o
+	$(NVCC) $(SHARED_FLAGS) -o $@ $^ -lcudart
+	@echo "Built INT4 GEMV kernel: $(INT4_TARGET)"
+
+# Combined INT4 + cuBLAS (RECOMMENDED for production)
+# Includes INT4 GEMV kernel + INT8 embedding kernel for fast logit computation
+CUBLAS_INT4_TARGET = $(LIB_DIR)/libcublas_int4.$(SHARED_EXT)
+
+cublas_int4.o: cublas_matmul.cu cublas_matmul.h int4_gemv.cu int4_gemv.h int8_embedding.h
+	$(NVCC) $(NVCC_FLAGS) -c cublas_matmul.cu -o cublas_int4.o -lcublas
+
+int4_gemv_standalone.o: int4_gemv.cu int4_gemv.h
+	$(NVCC) $(NVCC_FLAGS) -c int4_gemv.cu -o int4_gemv_standalone.o
+
+int8_embedding.o: int8_embedding.cu int8_embedding.h
+	$(NVCC) $(NVCC_FLAGS) -c int8_embedding.cu -o int8_embedding.o
+
+$(CUBLAS_INT4_TARGET): cublas_int4.o int4_gemv_standalone.o int8_embedding.o
+	$(NVCC) $(SHARED_FLAGS) -o $@ cublas_int4.o int4_gemv_standalone.o int8_embedding.o -lcudart -lcublas
+	@echo "Built cuBLAS + INT4 + INT8 embedding kernel: $(CUBLAS_INT4_TARGET)"
+
+# Build INT4 kernel standalone
+int4: dirs int4_gemv.o $(INT4_TARGET)
+	@echo "Built INT4 GEMV kernel (standalone)"
+
+# Build INT4 with cuBLAS integration (RECOMMENDED)
+cublas-int4: dirs cublas_int4.o int4_gemv_standalone.o int8_embedding.o $(CUBLAS_INT4_TARGET)
+	@echo "Built cuBLAS + INT4 + INT8 embedding (400+ tok/s target)"
+
 # Build everything for full GPU inference
 gpu-inference: dirs $(CUBLAS_TARGET)
 	@echo "Built complete GPU inference library"
+
+# Build full GPU inference with INT4 support
+gpu-inference-int4: dirs $(CUBLAS_INT4_TARGET)
+	@echo "Built complete GPU inference library with INT4 support"
 
 # Test binary
 test: dirs $(OBJECTS)
@@ -345,7 +389,7 @@ clean:
 	rm -f $(OBJECTS) flash_attention_int8.o flash_attention_v2.o flash_attention_v2_multi_gpu.o flash_attention_v2_optimized.o $(TARGET) $(STATIC_TARGET) $(FA_TARGET) $(INT8_TARGET) $(FA2_TARGET) $(FA2_MG_TARGET) $(FA2_OPT_TARGET)
 	rm -f rmsnorm_kernel.o ffn_kernel.o embeddings_kernel.o sampling_kernel.o linear_projection.o residual_add.o inference_pipeline.o
 	rm -f $(RMSNORM_TARGET) $(FFN_TARGET) $(EMBEDDINGS_TARGET) $(SAMPLING_TARGET) $(LINEAR_TARGET) $(RESIDUAL_TARGET) $(PIPELINE_TARGET) $(INFERENCE_TARGET)
-	rm -f cublas_matmul.o $(CUBLAS_TARGET)
+	rm -f cublas_matmul.o cublas_int4.o int4_gemv_standalone.o int8_embedding.o $(CUBLAS_TARGET) $(CUBLAS_INT4_TARGET) $(INT4_TARGET)
 	rm -f $(BIN_DIR)/test_cuda_kernel $(BIN_DIR)/test_flash_attention $(BIN_DIR)/test_flash_attention_int8 $(BIN_DIR)/test_flash_attention_v2_multi_gpu $(BIN_DIR)/test_flash_attention_v2_optimized
 
 # Install to system (optional)

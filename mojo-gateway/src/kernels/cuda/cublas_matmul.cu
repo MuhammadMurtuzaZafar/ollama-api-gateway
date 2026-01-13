@@ -8,6 +8,12 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <stdio.h>
+#include <cuda_fp16.h>
+
+// INT4 kernel declarations (from int4_gemv.cu)
+extern "C" int int4_init(cudaStream_t stream);
+extern "C" int int4_gemv(float* out, const float* x, const unsigned char* W, const half* scales, int out_dim, int in_dim);
+extern "C" void int4_sync();
 
 // Global cuBLAS handle - reuse across calls
 static cublasHandle_t g_cublas_handle = nullptr;
@@ -822,6 +828,587 @@ int gpu_forward(int token, int pos) {
     cudaMemcpy(&next_token, result, sizeof(int), cudaMemcpyDeviceToHost);
 
     return next_token;
+}
+
+// ============================================================
+// INT4 Quantized Inference Support
+// ============================================================
+
+#include "int4_gemv.h"
+#include "int8_embedding.h"
+
+// INT4 mode flag and buffers
+static bool g_int4_mode = false;
+
+// INT8 embedding buffers (for fast logit computation)
+static int8_t* g_emb_int8_gpu = nullptr;
+static half* g_emb_scales_gpu = nullptr;
+static bool g_use_int8_embedding = false;
+static uint8_t* g_int4_weights_gpu = nullptr;   // Packed INT4 weights
+static half* g_int4_scales_gpu = nullptr;       // FP16 scales
+static size_t g_int4_weights_size = 0;
+static size_t g_int4_scales_size = 0;
+
+// INT4 weight layout offsets (in bytes)
+static size_t g_int4_wq_scales_offset = 0;
+static size_t g_int4_wq_packed_offset = 0;
+static size_t g_int4_wk_scales_offset = 0;
+static size_t g_int4_wk_packed_offset = 0;
+static size_t g_int4_wv_scales_offset = 0;
+static size_t g_int4_wv_packed_offset = 0;
+static size_t g_int4_wo_scales_offset = 0;
+static size_t g_int4_wo_packed_offset = 0;
+static size_t g_int4_w1_scales_offset = 0;
+static size_t g_int4_w1_packed_offset = 0;
+static size_t g_int4_w2_scales_offset = 0;
+static size_t g_int4_w2_packed_offset = 0;
+static size_t g_int4_w3_scales_offset = 0;
+static size_t g_int4_w3_packed_offset = 0;
+
+/**
+ * Calculate INT4 model buffer sizes for allocation.
+ */
+void int4_calculate_sizes(
+    int dim, int hidden_dim, int n_layers, int n_heads, int n_kv_heads,
+    int vocab_size, int seq_len,
+    size_t* fp32_bytes,      // Embeddings, norms, biases (FP32)
+    size_t* int4_weights_bytes,  // Packed INT4 weights
+    size_t* int4_scales_bytes    // FP16 scales
+) {
+    int head_size = dim / n_heads;
+    int kv_dim = (n_kv_heads * dim) / n_heads;
+    int group_size = INT4_GROUP_SIZE;
+
+    // FP32 components (not quantized)
+    *fp32_bytes = (
+        vocab_size * dim +       // token_embedding
+        n_layers * dim +         // rms_att
+        n_layers * dim +         // rms_ffn
+        dim +                    // rms_final
+        seq_len * (head_size/2) + // freq_cos
+        seq_len * (head_size/2) + // freq_sin
+        n_layers * dim +         // bq
+        n_layers * kv_dim +      // bk
+        n_layers * kv_dim        // bv
+    ) * sizeof(float);
+
+    // INT4 packed weights (large matmul weights)
+    // wq: [n_layers, dim, dim] -> packed
+    // wk: [n_layers, kv_dim, dim] -> packed
+    // wv: [n_layers, kv_dim, dim] -> packed
+    // wo: [n_layers, dim, dim] -> packed
+    // w1: [n_layers, hidden_dim, dim] -> packed
+    // w2: [n_layers, dim, hidden_dim] -> packed
+    // w3: [n_layers, hidden_dim, dim] -> packed
+    size_t wq_packed = (size_t)n_layers * dim * dim / 2;
+    size_t wk_packed = (size_t)n_layers * kv_dim * dim / 2;
+    size_t wv_packed = (size_t)n_layers * kv_dim * dim / 2;
+    size_t wo_packed = (size_t)n_layers * dim * dim / 2;
+    size_t w1_packed = (size_t)n_layers * hidden_dim * dim / 2;
+    size_t w2_packed = (size_t)n_layers * dim * hidden_dim / 2;
+    size_t w3_packed = (size_t)n_layers * hidden_dim * dim / 2;
+
+    *int4_weights_bytes = wq_packed + wk_packed + wv_packed + wo_packed +
+                          w1_packed + w2_packed + w3_packed;
+
+    // FP16 scales for each weight
+    int n_groups_dim = (dim + group_size - 1) / group_size;
+    int n_groups_hd = (hidden_dim + group_size - 1) / group_size;
+
+    size_t wq_scales = (size_t)n_layers * dim * n_groups_dim * sizeof(half);
+    size_t wk_scales = (size_t)n_layers * kv_dim * n_groups_dim * sizeof(half);
+    size_t wv_scales = (size_t)n_layers * kv_dim * n_groups_dim * sizeof(half);
+    size_t wo_scales = (size_t)n_layers * dim * n_groups_dim * sizeof(half);
+    size_t w1_scales = (size_t)n_layers * hidden_dim * n_groups_dim * sizeof(half);
+    size_t w2_scales = (size_t)n_layers * dim * n_groups_hd * sizeof(half);
+    size_t w3_scales = (size_t)n_layers * hidden_dim * n_groups_dim * sizeof(half);
+
+    *int4_scales_bytes = wq_scales + wk_scales + wv_scales + wo_scales +
+                         w1_scales + w2_scales + w3_scales;
+}
+
+/**
+ * Initialize INT4 inference mode.
+ * Allocates separate buffers for INT4 packed weights and scales.
+ */
+int cublas_init_int4(size_t fp32_bytes, size_t int4_weights_bytes, size_t int4_scales_bytes,
+                     size_t activation_bytes) {
+    // Initialize standard cuBLAS first
+    cublasStatus_t status = cublasCreate(&g_cublas_handle);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        printf("cuBLAS init failed: %d\n", status);
+        return -1;
+    }
+
+    cudaStreamCreate(&g_stream);
+    cublasSetStream(g_cublas_handle, g_stream);
+
+    // Initialize INT4 kernels with our stream
+    int4_init(g_stream);
+
+    // Allocate FP32 buffer (embeddings, norms, biases, etc.)
+    if (fp32_bytes > 0) {
+        cudaMalloc(&g_weights_gpu, fp32_bytes);
+        g_weights_size = fp32_bytes;
+        printf("Allocated %.2f MB for FP32 weights on GPU\n", fp32_bytes / 1e6);
+    }
+
+    // Allocate INT4 packed weights buffer
+    if (int4_weights_bytes > 0) {
+        cudaMalloc(&g_int4_weights_gpu, int4_weights_bytes);
+        g_int4_weights_size = int4_weights_bytes;
+        printf("Allocated %.2f MB for INT4 packed weights on GPU\n", int4_weights_bytes / 1e6);
+    }
+
+    // Allocate INT4 scales buffer
+    if (int4_scales_bytes > 0) {
+        cudaMalloc(&g_int4_scales_gpu, int4_scales_bytes);
+        g_int4_scales_size = int4_scales_bytes;
+        printf("Allocated %.2f MB for INT4 scales on GPU\n", int4_scales_bytes / 1e6);
+    }
+
+    // Allocate activation buffer
+    if (activation_bytes > 0) {
+        cudaMalloc(&g_act_gpu, activation_bytes);
+        g_act_size = activation_bytes;
+        printf("Allocated %.2f MB for activations on GPU\n", activation_bytes / 1e6);
+    }
+
+    g_int4_mode = true;
+    return 0;
+}
+
+/**
+ * Upload INT4 weights to GPU.
+ *
+ * @param fp32_data FP32 weights (embeddings, norms, biases)
+ * @param fp32_bytes Size of FP32 data
+ * @param int4_packed Packed INT4 weights
+ * @param int4_packed_bytes Size of packed weights
+ * @param int4_scales FP16 scales
+ * @param int4_scales_bytes Size of scales
+ */
+int cublas_upload_int4_weights(
+    const float* fp32_data, size_t fp32_bytes,
+    const uint8_t* int4_packed, size_t int4_packed_bytes,
+    const half* int4_scales, size_t int4_scales_bytes
+) {
+    cudaError_t err;
+
+    // Upload FP32 data
+    if (fp32_data && fp32_bytes > 0) {
+        err = cudaMemcpy(g_weights_gpu, fp32_data, fp32_bytes, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            printf("FP32 upload failed: %s\n", cudaGetErrorString(err));
+            return -1;
+        }
+        printf("Uploaded %.2f MB FP32 weights to GPU\n", fp32_bytes / 1e6);
+    }
+
+    // Upload INT4 packed weights
+    if (int4_packed && int4_packed_bytes > 0) {
+        err = cudaMemcpy(g_int4_weights_gpu, int4_packed, int4_packed_bytes, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            printf("INT4 weights upload failed: %s\n", cudaGetErrorString(err));
+            return -1;
+        }
+        printf("Uploaded %.2f MB INT4 packed weights to GPU\n", int4_packed_bytes / 1e6);
+    }
+
+    // Upload scales
+    if (int4_scales && int4_scales_bytes > 0) {
+        err = cudaMemcpy(g_int4_scales_gpu, int4_scales, int4_scales_bytes, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            printf("INT4 scales upload failed: %s\n", cudaGetErrorString(err));
+            return -1;
+        }
+        printf("Uploaded %.2f MB INT4 scales to GPU\n", int4_scales_bytes / 1e6);
+    }
+
+    return 0;
+}
+
+/**
+ * Configure INT4 model dimensions and calculate weight offsets.
+ */
+int gpu_configure_int4(int dim, int hidden_dim, int n_layers, int n_heads, int n_kv_heads,
+                       int vocab_size, int seq_len, int has_bias) {
+    // Set basic dimensions (reuse FP32 config)
+    g_dim = dim;
+    g_hidden_dim = hidden_dim;
+    g_n_layers = n_layers;
+    g_n_heads = n_heads;
+    g_n_kv_heads = n_kv_heads;
+    g_vocab_size = vocab_size;
+    g_seq_len = seq_len;
+    g_head_dim = dim / n_heads;
+    g_kv_dim = (n_kv_heads * dim) / n_heads;
+    g_has_bias = (has_bias != 0);
+    g_int4_mode = true;
+
+    int group_size = INT4_GROUP_SIZE;
+    int n_groups_dim = (dim + group_size - 1) / group_size;
+    int n_groups_hd = (hidden_dim + group_size - 1) / group_size;
+
+    // FP32 weight offsets (in floats, for embeddings/norms/biases)
+    size_t offset = 0;
+    g_token_emb_offset = offset; offset += vocab_size * dim;
+    g_rms_att_offset = offset; offset += n_layers * dim;
+    g_rms_ffn_offset = offset; offset += n_layers * dim;
+    g_rms_final_offset = offset; offset += dim;
+    g_freq_cos_offset = offset; offset += seq_len * (g_head_dim / 2);
+    g_freq_sin_offset = offset; offset += seq_len * (g_head_dim / 2);
+
+    if (has_bias) {
+        g_bq_offset = offset; offset += n_layers * dim;
+        g_bk_offset = offset; offset += n_layers * g_kv_dim;
+        g_bv_offset = offset; offset += n_layers * g_kv_dim;
+    }
+
+    // INT4 scales offsets (in bytes)
+    size_t scales_offset = 0;
+    g_int4_wq_scales_offset = scales_offset;
+    scales_offset += (size_t)n_layers * dim * n_groups_dim * sizeof(half);
+    g_int4_wk_scales_offset = scales_offset;
+    scales_offset += (size_t)n_layers * g_kv_dim * n_groups_dim * sizeof(half);
+    g_int4_wv_scales_offset = scales_offset;
+    scales_offset += (size_t)n_layers * g_kv_dim * n_groups_dim * sizeof(half);
+    g_int4_wo_scales_offset = scales_offset;
+    scales_offset += (size_t)n_layers * dim * n_groups_dim * sizeof(half);
+    g_int4_w1_scales_offset = scales_offset;
+    scales_offset += (size_t)n_layers * hidden_dim * n_groups_dim * sizeof(half);
+    g_int4_w2_scales_offset = scales_offset;
+    scales_offset += (size_t)n_layers * dim * n_groups_hd * sizeof(half);
+    g_int4_w3_scales_offset = scales_offset;
+
+    // INT4 packed weights offsets (in bytes)
+    size_t packed_offset = 0;
+    g_int4_wq_packed_offset = packed_offset;
+    packed_offset += (size_t)n_layers * dim * dim / 2;
+    g_int4_wk_packed_offset = packed_offset;
+    packed_offset += (size_t)n_layers * g_kv_dim * dim / 2;
+    g_int4_wv_packed_offset = packed_offset;
+    packed_offset += (size_t)n_layers * g_kv_dim * dim / 2;
+    g_int4_wo_packed_offset = packed_offset;
+    packed_offset += (size_t)n_layers * dim * dim / 2;
+    g_int4_w1_packed_offset = packed_offset;
+    packed_offset += (size_t)n_layers * hidden_dim * dim / 2;
+    g_int4_w2_packed_offset = packed_offset;
+    packed_offset += (size_t)n_layers * dim * hidden_dim / 2;
+    g_int4_w3_packed_offset = packed_offset;
+
+    // Activation offsets (same as FP32)
+    size_t act_offset = 0;
+    g_x_offset = act_offset; act_offset += dim;
+    g_xb_offset = act_offset; act_offset += dim;
+    g_xb2_offset = act_offset; act_offset += dim;
+    g_q_offset = act_offset; act_offset += dim;
+    g_k_offset = act_offset; act_offset += g_kv_dim;
+    g_v_offset = act_offset; act_offset += g_kv_dim;
+    g_hb_offset = act_offset; act_offset += hidden_dim;
+    g_hb2_offset = act_offset; act_offset += hidden_dim;
+    g_logits_offset = act_offset; act_offset += vocab_size;
+    g_k_cache_offset = act_offset; act_offset += n_layers * n_kv_heads * seq_len * g_head_dim;
+    g_v_cache_offset = act_offset; act_offset += n_layers * n_kv_heads * seq_len * g_head_dim;
+    g_result_offset = act_offset;
+
+    printf("INT4 GPU configured: dim=%d, layers=%d, heads=%d/%d, vocab=%d, seq=%d\n",
+           dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len);
+    printf("  INT4 group size: %d, n_groups(dim): %d, n_groups(hd): %d\n",
+           group_size, n_groups_dim, n_groups_hd);
+    return 0;
+}
+
+/**
+ * INT4 GEMV helper - performs matmul using INT4 kernel
+ */
+static inline int int4_matvec_layer(
+    float* out_gpu,
+    const float* x_gpu,
+    size_t packed_offset,  // Offset into g_int4_weights_gpu
+    size_t scales_offset,  // Offset into g_int4_scales_gpu
+    int layer,
+    int out_dim,
+    int in_dim,
+    size_t per_layer_packed,
+    size_t per_layer_scales
+) {
+    const uint8_t* W_q = g_int4_weights_gpu + packed_offset + layer * per_layer_packed;
+    const half* scales = (half*)((uint8_t*)g_int4_scales_gpu + scales_offset + layer * per_layer_scales);
+
+    return int4_gemv(out_gpu, x_gpu, W_q, scales, out_dim, in_dim);
+}
+
+/**
+ * INT4 forward pass. Returns next token ID.
+ *
+ * Key difference from FP32: Uses int4_gemv for all matmuls
+ * Embeddings and norms remain FP32 for quality.
+ */
+int gpu_forward_int4(int token, int pos) {
+    if (!g_weights_gpu || !g_act_gpu || !g_int4_weights_gpu || !g_int4_scales_gpu || g_dim == 0) {
+        printf("INT4 GPU not initialized\n");
+        return -1;
+    }
+
+    // Shortcuts
+    float* w = g_weights_gpu;  // FP32 weights (embedding, norms)
+    float* a = g_act_gpu;
+
+    int d = g_dim;
+    int hd = g_hidden_dim;
+    int kv = g_kv_dim;
+    int hs = g_head_dim;
+    int group_size = INT4_GROUP_SIZE;
+    int n_groups_dim = (d + group_size - 1) / group_size;
+    int n_groups_hd = (hd + group_size - 1) / group_size;
+
+    // Per-layer sizes for INT4 weights
+    size_t wq_per_layer_packed = (size_t)d * d / 2;
+    size_t wk_per_layer_packed = (size_t)kv * d / 2;
+    size_t wv_per_layer_packed = (size_t)kv * d / 2;
+    size_t wo_per_layer_packed = (size_t)d * d / 2;
+    size_t w1_per_layer_packed = (size_t)hd * d / 2;
+    size_t w2_per_layer_packed = (size_t)d * hd / 2;
+    size_t w3_per_layer_packed = (size_t)hd * d / 2;
+
+    size_t wq_per_layer_scales = (size_t)d * n_groups_dim * sizeof(half);
+    size_t wk_per_layer_scales = (size_t)kv * n_groups_dim * sizeof(half);
+    size_t wv_per_layer_scales = (size_t)kv * n_groups_dim * sizeof(half);
+    size_t wo_per_layer_scales = (size_t)d * n_groups_dim * sizeof(half);
+    size_t w1_per_layer_scales = (size_t)hd * n_groups_dim * sizeof(half);
+    size_t w2_per_layer_scales = (size_t)d * n_groups_hd * sizeof(half);
+    size_t w3_per_layer_scales = (size_t)hd * n_groups_dim * sizeof(half);
+
+    // Activation pointers
+    float* x = a + g_x_offset;
+    float* xb = a + g_xb_offset;
+    float* xb2 = a + g_xb2_offset;
+    float* q = a + g_q_offset;
+    float* k = a + g_k_offset;
+    float* v = a + g_v_offset;
+    float* hb = a + g_hb_offset;
+    float* hb2 = a + g_hb2_offset;
+    float* logits = a + g_logits_offset;
+    float* k_cache = a + g_k_cache_offset;
+    float* v_cache = a + g_v_cache_offset;
+    int* result = (int*)(a + g_result_offset);
+
+    // Token embedding lookup (FP32)
+    float* emb = w + g_token_emb_offset + token * d;
+    cudaMemcpyAsync(x, emb, d * sizeof(float), cudaMemcpyDeviceToDevice, g_stream);
+
+    // Forward through layers
+    for (int layer = 0; layer < g_n_layers; layer++) {
+        // Weight pointers for norms (FP32)
+        float* rms_att = w + g_rms_att_offset + layer * d;
+        float* rms_ffn = w + g_rms_ffn_offset + layer * d;
+
+        // RMSNorm
+        rmsnorm_kernel<<<1, 256, 0, g_stream>>>(xb, x, rms_att, d, 1e-6f);
+
+        // QKV projections using INT4 GEMV
+        int4_matvec_layer(q, xb, g_int4_wq_packed_offset, g_int4_wq_scales_offset,
+                         layer, d, d, wq_per_layer_packed, wq_per_layer_scales);
+        int4_matvec_layer(k, xb, g_int4_wk_packed_offset, g_int4_wk_scales_offset,
+                         layer, kv, d, wk_per_layer_packed, wk_per_layer_scales);
+        int4_matvec_layer(v, xb, g_int4_wv_packed_offset, g_int4_wv_scales_offset,
+                         layer, kv, d, wv_per_layer_packed, wv_per_layer_scales);
+
+        // Add biases if present (FP32)
+        if (g_has_bias) {
+            float* bq = w + g_bq_offset + layer * d;
+            float* bk = w + g_bk_offset + layer * kv;
+            float* bv = w + g_bv_offset + layer * kv;
+            add_bias_kernel<<<(d+255)/256, 256, 0, g_stream>>>(q, bq, d);
+            add_bias_kernel<<<(kv+255)/256, 256, 0, g_stream>>>(k, bk, kv);
+            add_bias_kernel<<<(kv+255)/256, 256, 0, g_stream>>>(v, bv, kv);
+        }
+
+        // RoPE (FP32 freqs)
+        int freq_offset = pos * (hs / 2);
+        float* cos = w + g_freq_cos_offset + freq_offset;
+        float* sin = w + g_freq_sin_offset + freq_offset;
+        int max_heads = (g_n_heads > g_n_kv_heads) ? g_n_heads : g_n_kv_heads;
+        rope_kernel<<<max_heads, hs/2, 0, g_stream>>>(q, k, cos, sin, g_n_heads, g_n_kv_heads, hs);
+
+        // KV cache update
+        float* layer_k_cache = k_cache + layer * g_n_kv_heads * g_seq_len * hs;
+        float* layer_v_cache = v_cache + layer * g_n_kv_heads * g_seq_len * hs;
+        kv_cache_update_kernel<<<g_n_kv_heads, hs, 0, g_stream>>>(
+            layer_k_cache, layer_v_cache, k, v, g_n_kv_heads, pos, g_seq_len, hs);
+
+        // GQA Attention
+        float scale = 1.0f / sqrtf((float)hs);
+        int smem = (pos + 1 + 32) * sizeof(float);
+        gqa_attention_kernel<<<g_n_heads, 128, smem, g_stream>>>(
+            xb, q, layer_k_cache, layer_v_cache,
+            g_n_heads, g_n_kv_heads, pos + 1, g_seq_len, hs, scale);
+
+        // Output projection (INT4)
+        int4_matvec_layer(xb2, xb, g_int4_wo_packed_offset, g_int4_wo_scales_offset,
+                         layer, d, d, wo_per_layer_packed, wo_per_layer_scales);
+
+        // Residual add
+        residual_add_kernel<<<(d+255)/256, 256, 0, g_stream>>>(x, xb2, d);
+
+        // Sync after attention block (for multirow debugging)
+        #ifdef MULTIROW_ATTN_SYNC
+        int4_sync();
+        #endif
+
+        // FFN
+        rmsnorm_kernel<<<1, 256, 0, g_stream>>>(xb, x, rms_ffn, d, 1e-6f);
+
+        // FFN projections (INT4)
+        int4_matvec_layer(hb, xb, g_int4_w1_packed_offset, g_int4_w1_scales_offset,
+                         layer, hd, d, w1_per_layer_packed, w1_per_layer_scales);
+        int4_matvec_layer(hb2, xb, g_int4_w3_packed_offset, g_int4_w3_scales_offset,
+                         layer, hd, d, w3_per_layer_packed, w3_per_layer_scales);
+
+        swiglu_kernel<<<(hd+255)/256, 256, 0, g_stream>>>(hb, hb, hb2, hd);
+
+        int4_matvec_layer(xb, hb, g_int4_w2_packed_offset, g_int4_w2_scales_offset,
+                         layer, d, hd, w2_per_layer_packed, w2_per_layer_scales);
+
+        residual_add_kernel<<<(d+255)/256, 256, 0, g_stream>>>(x, xb, d);
+
+        // Sync INT4 stream at end of each layer (for multirow kernel debugging)
+        #ifdef MULTIROW_LAYER_SYNC
+        int4_sync();
+        #endif
+    }
+
+    // Final RMSNorm (FP32)
+    float* rms_final = w + g_rms_final_offset;
+    rmsnorm_kernel<<<1, 256, 0, g_stream>>>(xb, x, rms_final, d, 1e-6f);
+
+    // Logits computation
+    if (g_use_int8_embedding && g_emb_int8_gpu && g_emb_scales_gpu) {
+        // Use INT8 embedding for fast logit computation (1.6x faster than FP32)
+        // Standard kernel keeps input FP32, avoids quantization overhead
+        int8_logit_gemv(logits, xb, g_emb_int8_gpu, g_emb_scales_gpu, g_vocab_size, d);
+    } else {
+        // Fallback to FP32 cuBLAS (slower but always available)
+        float* token_emb = w + g_token_emb_offset;
+        cublas_matvec(logits, xb, token_emb, g_vocab_size, d);
+    }
+
+    // Argmax
+    argmax_kernel<<<1, 256, 0, g_stream>>>(result, logits, g_vocab_size);
+
+    // Sync and return
+    cudaStreamSynchronize(g_stream);
+    int next_token;
+    cudaMemcpy(&next_token, result, sizeof(int), cudaMemcpyDeviceToHost);
+
+    return next_token;
+}
+
+/**
+ * Initialize INT8 embedding for fast logit computation.
+ * Call after cublas_init_int4 to enable INT8 logits.
+ */
+int int8_embedding_init(int vocab_size, int dim) {
+    if (g_emb_int8_gpu || g_emb_scales_gpu) {
+        printf("INT8 embedding already initialized\n");
+        return -1;
+    }
+
+    // Allocate INT8 embedding table
+    size_t emb_bytes = (size_t)vocab_size * dim * sizeof(int8_t);
+    size_t scales_bytes = (size_t)vocab_size * sizeof(half);
+
+    cudaError_t err = cudaMalloc(&g_emb_int8_gpu, emb_bytes);
+    if (err != cudaSuccess) {
+        printf("Failed to allocate INT8 embedding: %s\n", cudaGetErrorString(err));
+        return -1;
+    }
+
+    err = cudaMalloc(&g_emb_scales_gpu, scales_bytes);
+    if (err != cudaSuccess) {
+        printf("Failed to allocate INT8 embedding scales: %s\n", cudaGetErrorString(err));
+        cudaFree(g_emb_int8_gpu);
+        g_emb_int8_gpu = nullptr;
+        return -1;
+    }
+
+    // Initialize INT8 kernel with stream
+    int8_emb_init(g_stream);
+
+    printf("Allocated %.2f MB for INT8 embedding on GPU (4x smaller than FP32)\n",
+           (emb_bytes + scales_bytes) / 1e6);
+    return 0;
+}
+
+/**
+ * Upload INT8 quantized embedding to GPU.
+ */
+int int8_embedding_upload(
+    const int8_t* emb_int8,
+    const half* scales,
+    int vocab_size,
+    int dim
+) {
+    if (!g_emb_int8_gpu || !g_emb_scales_gpu) {
+        printf("INT8 embedding not initialized\n");
+        return -1;
+    }
+
+    size_t emb_bytes = (size_t)vocab_size * dim * sizeof(int8_t);
+    size_t scales_bytes = (size_t)vocab_size * sizeof(half);
+
+    cudaError_t err = cudaMemcpy(g_emb_int8_gpu, emb_int8, emb_bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        printf("Failed to upload INT8 embedding: %s\n", cudaGetErrorString(err));
+        return -1;
+    }
+
+    err = cudaMemcpy(g_emb_scales_gpu, scales, scales_bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        printf("Failed to upload INT8 embedding scales: %s\n", cudaGetErrorString(err));
+        return -1;
+    }
+
+    g_use_int8_embedding = true;
+    printf("Uploaded INT8 embedding: %.2f MB (INT8) + %.2f KB (scales)\n",
+           emb_bytes / 1e6, scales_bytes / 1e3);
+    return 0;
+}
+
+/**
+ * Enable/disable INT8 embedding for logit computation.
+ */
+void set_int8_embedding_mode(int enable) {
+    g_use_int8_embedding = (enable != 0) && g_emb_int8_gpu && g_emb_scales_gpu;
+    printf("INT8 embedding mode: %s\n", g_use_int8_embedding ? "ENABLED" : "DISABLED");
+}
+
+/**
+ * Cleanup INT4 resources
+ */
+void cublas_cleanup_int4() {
+    if (g_int4_weights_gpu) cudaFree(g_int4_weights_gpu);
+    if (g_int4_scales_gpu) cudaFree(g_int4_scales_gpu);
+    if (g_emb_int8_gpu) cudaFree(g_emb_int8_gpu);
+    if (g_emb_scales_gpu) cudaFree(g_emb_scales_gpu);
+
+    g_int4_weights_gpu = nullptr;
+    g_int4_scales_gpu = nullptr;
+    g_emb_int8_gpu = nullptr;
+    g_emb_scales_gpu = nullptr;
+    g_int4_mode = false;
+    g_use_int8_embedding = false;
+
+    // Call base cleanup
+    cublas_cleanup();
+}
+
+/**
+ * Get INT4 mode status
+ */
+int is_int4_mode() {
+    return g_int4_mode ? 1 : 0;
 }
 
 }  // extern "C"

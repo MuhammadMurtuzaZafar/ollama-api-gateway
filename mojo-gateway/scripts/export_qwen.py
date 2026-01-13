@@ -153,8 +153,30 @@ def export_qwen(model_id: str, output_path: str):
         # Note: wcls (output projection) is skipped if weights are shared with embeddings
         # The Mojo code handles this with shared_weights flag
 
+        # 14-16. Q/K/V biases (Qwen has these, most models don't)
+        # Check if model has QKV biases
+        has_qkv_bias = f'model.layers.0.self_attn.q_proj.bias' in state_dict
+
+        if has_qkv_bias:
+            print("\nWriting QKV biases (Qwen-specific)...")
+
+            # bq [n_layers, dim]
+            bq = torch.stack([state_dict[f'model.layers.{i}.self_attn.q_proj.bias'] for i in range(n_layers)])
+            write_tensor(bq, 'bq')
+
+            # bk [n_layers, kv_dim]
+            bk = torch.stack([state_dict[f'model.layers.{i}.self_attn.k_proj.bias'] for i in range(n_layers)])
+            write_tensor(bk, 'bk')
+
+            # bv [n_layers, kv_dim]
+            bv = torch.stack([state_dict[f'model.layers.{i}.self_attn.v_proj.bias'] for i in range(n_layers)])
+            write_tensor(bv, 'bv')
+        else:
+            print("\nNo QKV biases in this model")
+
     file_size = os.path.getsize(output_path)
     print(f"\nDone! Output size: {file_size / 1024 / 1024:.2f} MB")
+    print(f"Has QKV bias: {has_qkv_bias}")
 
     # Export tokenizer
     tokenizer_path = output_path.replace('.bin', '_tokenizer.bin')
