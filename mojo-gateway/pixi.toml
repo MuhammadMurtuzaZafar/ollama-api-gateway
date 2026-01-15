@@ -1,0 +1,22 @@
+[workspace]
+authors = ["umerkhan95 <96595386+umerkhan95@users.noreply.github.com>"]
+channels = ["conda-forge", "https://conda.modular.com/max"]
+name = "mojo-gateway"
+platforms = ["osx-arm64", "linux-64"]
+version = "0.1.0"
+
+[tasks]
+dev = "mojo run src/main.mojo"
+build = "mojo build src/main.mojo -o bin/gateway"
+build-cli = "mojo build -O3 src/edgellm_cli.mojo -o bin/edgellm"
+cli = "mojo run src/edgellm_cli.mojo"
+cli-models = "mojo run src/edgellm_cli.mojo models"
+cli-help = "mojo run src/edgellm_cli.mojo --help"
+
+# Package building and publishing
+build-package = "rattler-build build --recipe conda-recipe/recipe.yaml --output-dir dist/"
+publish = "bash scripts/publish.sh"
+
+[dependencies]
+max = ">=25.1"
+mojo = ">=0.25.7.0,<0.26"

@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  mojo-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: mojo-gateway-dev
+    volumes:
+      - ./src:/app/src:rw
+    ports:
+      - "8080:8080"
+    environment:
+      - GATEWAY_HOST=0.0.0.0
+      - GATEWAY_PORT=8080
+    stdin_open: true
+    tty: true
+    command: /bin/bash

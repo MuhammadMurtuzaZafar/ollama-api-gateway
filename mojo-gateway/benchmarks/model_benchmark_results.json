@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-01-11 06:52:47",
+  "model_info": {
+    "size_mb": 53.180166244506836,
+    "hidden_size": 576,
+    "num_layers": 30,
+    "num_heads": 9,
+    "vocab_size": 49152,
+    "bits": 2,
+    "estimated_params_m": 187.564032
+  },
+  "kernel_results": {
+    "rmsnorm_latency_us": 1.0,
+    "rmsnorm_throughput_gbps": 47.95,
+    "softmax_latency_us": 25.0,
+    "softmax_throughput_gbps": 1.32
+  },
+  "edgellm_estimate": {
+    "rmsnorm_total_us": 60.0,
+    "softmax_total_us": 750.0,
+    "matmul_total_us": 17426.076875000002,
+    "total_latency_us": 18236.076875000002,
+    "theoretical_tps": 54.83635580473499,
+    "practical_tps": 38.38544906331449
+  },
+  "ollama": {
+    "throughput_tps": 156.6716556109923,
+    "latency_p50_ms": 2246.005975990556,
+    "latency_jitter_ms": 5565.942743686186
+  }
+}

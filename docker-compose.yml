@@ -1,7 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: ollama-postgres
+    container_name: edgellm-postgres
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -17,17 +17,17 @@ services:
       retries: 5
     restart: unless-stopped
     networks:
-      - ollama-network
+      - edgellm-network
 
-  ollama-api:
+  edgellm-api:
     platform: ${DOCKER_PLATFORM}
     build: ./backend
-    container_name: ollama-api-service
+    container_name: edgellm-api-service
     ports:
       - "${PORT}:8000"
     environment:
       - SECRET_KEY=${SECRET_KEY}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
+      - EDGELLM_BASE_URL=${EDGELLM_BASE_URL}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES}
       - DATABASE_URL=${DATABASE_URL}
       - DEMO_ADMIN_KEY=${DEMO_ADMIN_KEY}
@@ -39,28 +39,28 @@ services:
         condition: service_healthy
     restart: unless-stopped
     networks:
-      - ollama-network
+      - edgellm-network
 
   frontend:
     platform: ${DOCKER_PLATFORM}
     build: ./frontend
-    container_name: ollama-frontend
+    container_name: edgellm-frontend
     ports:
       - "${FRONTEND_PORT}:3000"
     environment:
       - VITE_API_URL=${VITE_API_URL}
     depends_on:
-      - ollama-api
+      - edgellm-api
     restart: unless-stopped
     volumes:
       - ./frontend:/app
       - /app/node_modules
     networks:
-      - ollama-network
+      - edgellm-network
 
 volumes:
   postgres_data:
 
 networks:
-  ollama-network:
+  edgellm-network:
     driver: bridge

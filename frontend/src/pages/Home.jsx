@@ -11,10 +11,10 @@ const Home = () => {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         <div className="text-center">
           <h1 className="text-5xl font-bold text-gray-900 dark:text-white mb-4">
-            Ollama API Gateway
+            EdgeLLM API Gateway
           </h1>
           <p className="text-xl text-gray-600 dark:text-gray-300 mb-8">
-            Secure, scalable, and monitored access to Ollama AI models
+            High-performance LLM inference with deterministic latency for edge devices
           </p>
 
           {!user && (
@@ -99,7 +99,7 @@ const Home = () => {
               <span className="flex items-center justify-center h-6 w-6 rounded-full bg-primary-600 text-white text-sm font-medium mr-3">
                 3
               </span>
-              <p>Use your API key to make requests to Ollama models through our gateway</p>
+              <p>Use your API key to make requests to EdgeLLM models through our gateway</p>
             </div>
           </div>
         </div>
@@ -127,7 +127,7 @@ const Home = () => {
                 </h2>
               </div>
               <p className="text-primary-100 mb-4">
-                Explore comprehensive guides, code examples, and endpoint references to integrate with the Ollama API Gateway
+                Explore comprehensive guides, code examples, and endpoint references to integrate with the EdgeLLM API Gateway
               </p>
               <Link
                 to="/docs"

@@ -1,13 +1,13 @@
 # 🔧 Environment Configuration Guide
 
-Complete documentation for all environment variables in the Ollama API Gateway.
+Complete documentation for all environment variables in the EdgeLLM API Gateway.
 
 ## Table of Contents
 
 1. [Quick Reference](#quick-reference)
 2. [Database Configuration](#database-configuration)
 3. [Backend API Configuration](#backend-api-configuration)
-4. [Ollama Configuration](#ollama-configuration)
+4. [EdgeLLM Configuration](#edgellm-configuration)
 5. [Demo & Testing](#demo--testing)
 6. [Frontend Configuration](#frontend-configuration)
 7. [Docker Configuration](#docker-configuration)
@@ -20,9 +20,9 @@ Complete documentation for all environment variables in the Ollama API Gateway.
 
 | Variable | Default | Required | Environment |
 |----------|---------|----------|-------------|
-| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@postgres:5432/ollama_api` | ✅ | All |
+| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@postgres:5432/edgellm_api` | ✅ | All |
 | `SECRET_KEY` | (generated) | ✅ | All |
-| `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | ✅ | All |
+| `EDGELLM_BASE_URL` | `http://host.docker.internal:8080` | ✅ | All |
 | `VITE_API_URL` | `http://localhost:8000` | ✅ | Frontend |
 | `DEMO_ADMIN_KEY` | `demo-admin-key-12345` | ❌ | Dev/Test |
 | `DEMO_USER_KEY` | `demo-user-key-67890` | ❌ | Dev/Test |
@@ -39,28 +39,28 @@ Complete connection string for PostgreSQL database.
 
 **Docker (Default)**:
 ```env
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/ollama_api
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/edgellm_api
 ```
 - Uses internal Docker DNS to connect to `postgres` service
 - Credentials match `POSTGRES_USER` and `POSTGRES_PASSWORD`
 
 **Local Development**:
 ```env
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/ollama_api
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/edgellm_api
 ```
 - Connects to local PostgreSQL instance
 - PostgreSQL must be running: `brew services start postgresql`
 
 **Remote Database (AWS RDS)**:
 ```env
-DATABASE_URL=postgresql+asyncpg://admin:securepassword@mydb.xxxxx.rds.amazonaws.com:5432/ollama_api
+DATABASE_URL=postgresql+asyncpg://admin:securepassword@mydb.xxxxx.rds.amazonaws.com:5432/edgellm_api
 ```
 - Use fully qualified RDS endpoint
 - Ensure security groups allow connection
 
 **Remote Database (Google Cloud SQL)**:
 ```env
-DATABASE_URL=postgresql+asyncpg://postgres:password@cloudsql-proxy:5432/ollama_api
+DATABASE_URL=postgresql+asyncpg://postgres:password@cloudsql-proxy:5432/edgellm_api
 ```
 - Use Cloud SQL Proxy
 - Configure firewall rules in GCP Console
@@ -68,7 +68,7 @@ DATABASE_URL=postgresql+asyncpg://postgres:password@cloudsql-proxy:5432/ollama_a
 ### Related Variables
 
 ```env
-POSTGRES_DB=ollama_api
+POSTGRES_DB=edgellm_api
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=postgres
 POSTGRES_PORT=5432
@@ -212,11 +212,11 @@ netstat -ano | findstr :8000
 
 ---
 
-## Ollama Configuration
+## EdgeLLM Configuration
 
-### `OLLAMA_BASE_URL`
+### `EDGELLM_BASE_URL`
 
-**Purpose**: URL to reach the Ollama service
+**Purpose**: URL to reach the EdgeLLM inference service
 
 **Critical for Success**: This is the #1 source of connectivity issues!
 
@@ -224,16 +224,16 @@ netstat -ano | findstr :8000
 
 #### Docker Desktop (macOS/Windows)
 ```env
-OLLAMA_BASE_URL=http://host.docker.internal:11434
+EDGELLM_BASE_URL=http://host.docker.internal:8080
 ```
 - Use `host.docker.internal` (Docker DNS magic hostname)
-- Default Ollama port is 11434
-- Works with Ollama running on host machine
+- Default EdgeLLM inference port is 8080
+- Works with EdgeLLM running on host machine
 
 #### Docker on Linux
 ```env
 # Option A: Gateway IP
-OLLAMA_BASE_URL=http://172.17.0.1:11434
+EDGELLM_BASE_URL=http://172.17.0.1:8080
 
 # Option B: Host network mode (better)
 # In docker-compose.yml, add: network_mode: host
@@ -243,7 +243,7 @@ OLLAMA_BASE_URL=http://172.17.0.1:11434
 
 #### Local Development (No Docker)
 ```env
-OLLAMA_BASE_URL=http://localhost:11434
+EDGELLM_BASE_URL=http://localhost:8080
 ```
 - Direct localhost connection
 - Ollama must be running locally
@@ -251,39 +251,39 @@ OLLAMA_BASE_URL=http://localhost:11434
 #### Remote Ollama Server
 ```env
 # IP-based
-OLLAMA_BASE_URL=http://192.168.1.100:11434
+EDGELLM_BASE_URL=http://192.168.1.100:8080
 
 # DNS-based
-OLLAMA_BASE_URL=http://ollama.example.com:11434
+EDGELLM_BASE_URL=http://edgellm.example.com:8080
 
 # Custom port
-OLLAMA_BASE_URL=http://ollama.example.com:9000
+EDGELLM_BASE_URL=http://edgellm.example.com:9000
 ```
 
 **Troubleshooting Connectivity**:
 
 ```bash
 # Test connection
-curl http://localhost:11434/api/tags
+curl http://localhost:8080/api/tags
 
 # Pull a model
-ollama pull llama2
+./bin/edgellm models/smollm-135m.tm2.bin
 
 # Check Ollama status
-ollama ps
+docker compose ps edgellm
 
 # View logs
-ollama logs
+docker compose logs edgellm
 ```
 
 **Common Errors**:
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| `Connection refused` | Ollama not running | Start Ollama: `ollama serve` |
-| `Cannot reach host` | Wrong URL | Check `OLLAMA_BASE_URL` |
+| `Connection refused` | EdgeLLM not running | Start EdgeLLM: `docker compose up edgellm` |
+| `Cannot reach host` | Wrong URL | Check `EDGELLM_BASE_URL` |
 | `Network error` | Firewall blocked | Allow port 11434 |
-| `Empty model list` | No models installed | `ollama pull llama2` |
+| `Empty model list` | No models installed | `./bin/edgellm models/smollm-135m.tm2.bin` |
 
 ---
 
@@ -530,7 +530,7 @@ openssl rand -base64 32
 
 ```env
 # Database
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/ollama_api
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/edgellm_api
 
 # Security (use defaults for dev)
 SECRET_KEY=NKLdJTql1oGCsTOGqdpJGVQCkt6FntM5D5ffiODjqRc
@@ -541,7 +541,7 @@ HOST=0.0.0.0
 PORT=8000
 
 # Ollama
-OLLAMA_BASE_URL=http://localhost:11434
+EDGELLM_BASE_URL=http://localhost:8080
 
 # Demo Keys (enabled for testing)
 DEMO_ADMIN_KEY=demo-admin-key-12345
@@ -559,7 +559,7 @@ DOCKER_PLATFORM=linux/amd64
 
 ```env
 # Database (managed service)
-DATABASE_URL=postgresql+asyncpg://admin:secure_password@staging-db.example.com:5432/ollama_api
+DATABASE_URL=postgresql+asyncpg://admin:secure_password@staging-db.example.com:5432/edgellm_api
 POSTGRES_PASSWORD=secure_password
 
 # Security (unique keys)
@@ -571,7 +571,7 @@ HOST=0.0.0.0
 PORT=8000
 
 # Ollama
-OLLAMA_BASE_URL=http://ollama-staging.internal:11434
+EDGELLM_BASE_URL=http://edgellm-staging.internal:8080
 
 # Demo Keys (disabled)
 DEMO_ADMIN_KEY=
@@ -589,7 +589,7 @@ DOCKER_PLATFORM=linux/amd64
 
 ```env
 # Database (secured connection)
-DATABASE_URL=postgresql+asyncpg://prod_user:secure_prod_password@prod-db.example.com:5432/ollama_api
+DATABASE_URL=postgresql+asyncpg://prod_user:secure_prod_password@prod-db.example.com:5432/edgellm_api
 POSTGRES_PASSWORD=secure_prod_password
 
 # Security (strong settings)
@@ -601,7 +601,7 @@ HOST=0.0.0.0
 PORT=8000
 
 # Ollama
-OLLAMA_BASE_URL=http://ollama-prod.internal:11434
+EDGELLM_BASE_URL=http://edgellm-prod.internal:8080
 
 # Demo Keys (disabled)
 DEMO_ADMIN_KEY=
@@ -637,7 +637,7 @@ except Exception as e:
 EOF
 
 # Validate Ollama connection
-curl -s $OLLAMA_BASE_URL/api/tags > /dev/null && echo "✅ Ollama OK" || echo "❌ Ollama failed"
+curl -s $EDGELLM_BASE_URL/api/tags > /dev/null && echo "✅ Ollama OK" || echo "❌ Ollama failed"
 
 # Validate API response
 curl -H "Authorization: Bearer $DEMO_ADMIN_KEY" \
@@ -671,16 +671,16 @@ lsof -i :5432
 **Solutions**:
 ```bash
 # Test curl
-curl http://localhost:11434/api/tags
+curl http://localhost:8080/api/tags
 
-# Check Ollama running
-ollama ps
+# Check EdgeLLM running
+docker compose ps edgellm
 
 # Check port
-lsof -i :11434
+lsof -i :8080
 
 # Verify environment variable
-echo $OLLAMA_BASE_URL
+echo $EDGELLM_BASE_URL
 ```
 
 ### Frontend API Connection Issues
@@ -700,7 +700,7 @@ curl http://localhost:8000/health
 
 # Verify frontend container network
 docker network ls
-docker network inspect ollama-api-service_ollama-network
+docker network inspect edgellm-api-service_edgellm-network
 ```
 
 ---

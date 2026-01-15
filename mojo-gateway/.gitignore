@@ -1,0 +1,14 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Large model files
+*.bin
+
+# Cloned inference repos
+inference/
+
+# Large model files
+mojo-gateway/models/
+*.safetensors
+*.tmac2.bin
