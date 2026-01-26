@@ -1,0 +1,20 @@
+[project]
+name = "ollama-mojo-gateway"
+version = "0.1.0"
+description = "High-performance API Gateway for LLM inference using Mojo and MAX Engine"
+authors = ["Ollama Gateway Team"]
+channels = [
+    "conda-forge",
+    "https://conda.modular.com/max",
+    "https://repo.prefix.dev/modular-community"
+]
+
+[dependencies]
+max = ">=25.5"
+lightbug_http = ">=0.25.7,<0.26"
+
+[tasks]
+dev = "mojo run src/main.mojo"
+build = "mojo build src/main.mojo -o bin/gateway"
+test = "mojo test tests/"
+bench = "mojo run benchmarks/benchmark.mojo"

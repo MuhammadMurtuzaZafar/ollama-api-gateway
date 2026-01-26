@@ -1,0 +1,58 @@
+# Single-stage build for BitNet T-MAC Inference on Fly.io
+# Using single stage to keep Mojo runtime libraries
+FROM ubuntu:22.04
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    build-essential \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pixi
+RUN curl -fsSL https://pixi.sh/install.sh | bash
+ENV PATH="/root/.pixi/bin:$PATH"
+
+WORKDIR /build
+
+# Copy project files for building
+COPY pixi.toml .
+COPY src/bitnet_server.mojo src/
+
+# Install Mojo and build optimized T-MAC LUT server
+RUN pixi install
+RUN mkdir -p bin && pixi run mojo build -O3 src/bitnet_server.mojo -o bin/bitnet_server
+
+# Install Python API dependencies
+RUN pip3 install --no-cache-dir fastapi uvicorn pydantic
+
+WORKDIR /app
+
+# Copy built binary
+RUN mkdir -p /app/bin && cp /build/bin/bitnet_server /app/bin/bitnet_server
+
+# Copy model (this makes the image large but is necessary)
+COPY models/bitnet-2b.tmac2.bin /app/models/bitnet-2b.tmac2.bin
+
+# Copy API server
+COPY api/server.py /app/server.py
+
+# Set permissions
+RUN chmod +x /app/bin/bitnet_server
+
+# Environment - set LD_LIBRARY_PATH to include pixi Mojo libs
+ENV MODEL_PATH=/app/models/bitnet-2b.tmac2.bin
+ENV BINARY_PATH=/app/bin/bitnet_server
+ENV PORT=8080
+ENV LD_LIBRARY_PATH=/root/.pixi/envs/default/lib:$LD_LIBRARY_PATH
+
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Run server
+CMD ["python3", "server.py"]

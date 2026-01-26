@@ -1,0 +1,29 @@
+# EdgeLLM Benchmark - Fly.io Configuration
+# Deploy: flyctl launch --config fly.benchmark.toml
+# Run: flyctl deploy --config fly.benchmark.toml
+
+app = "edgellm-benchmark"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile.benchmark"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+  MODEL_PATH = "/workspace/models/smollm-135m.tmac2.bin"
+
+# Machine configuration for benchmarking
+# Use performance CPUs for accurate benchmarks
+[[vm]]
+  cpu_kind = "performance"
+  cpus = 4
+  memory_mb = 8192
+
+# Mount volume for results
+[mounts]
+  source = "benchmark_results"
+  destination = "/workspace/results"
+
+# No HTTP service - this is a one-shot benchmark job
+# Use `flyctl ssh console` to run benchmarks manually
+# Or use `flyctl machine run` for one-shot execution

@@ -1,0 +1,349 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "generated": "2026-01-11T13:56:08.152813",
+    "description": "EdgeLLM Benchmark Results"
+  },
+  "results": {
+    "Ollama": {
+      "config": {
+        "model_path": "",
+        "model_name": "smollm:135m",
+        "backend": "ollama",
+        "num_runs": 30,
+        "warmup_runs": 5,
+        "tokens_per_run": 32,
+        "prompts": [],
+        "temperature": 0.0
+      },
+      "system": {
+        "platform": "Darwin",
+        "os_version": "24.6.0",
+        "cpu_model": "i386",
+        "cpu_cores": 8,
+        "cpu_freq_mhz": 2300,
+        "ram_gb": 32.0,
+        "python_version": "3.11.5",
+        "timestamp": "2026-01-11T13:46:03.636847"
+      },
+      "latency": {
+        "mean": 7808.410747959796,
+        "std": 5799.430477426274,
+        "min": 176.28019710537046,
+        "max": 19683.90892399475,
+        "p50": 8867.647381033748,
+        "p90": 15960.28496301733,
+        "p95": 16085.826350958087,
+        "p99": 19683.90892399475,
+        "jitter": 5799.430477426274
+      },
+      "throughput": {
+        "mean": 135.9767610172555,
+        "std": 31.03826985583346,
+        "min": 86.8528687314165,
+        "max": 193.85184235390932,
+        "samples": [
+          177.64270300355264,
+          193.85184235390932,
+          135.30118753823402,
+          118.23663771189186,
+          123.54717109850702,
+          86.8528687314165,
+          98.88974127572072,
+          105.35464148089723,
+          134.18953052746068,
+          134.4420118739185,
+          113.29748819921852,
+          95.10922971509865,
+          106.35141047926358,
+          132.26325065902162,
+          127.21735655444796,
+          135.0585461536589,
+          186.81375485017546,
+          178.7593280341521,
+          142.51776709712243,
+          119.55812060400541,
+          133.05750182391205,
+          127.45877722485606,
+          125.64517314555263,
+          118.5226575643865,
+          192.93024853814822,
+          192.04452155340203,
+          136.45907967396806
+        ]
+      },
+      "memory": {
+        "model_size_mb": 0.0,
+        "peak_memory_mb": 0.0,
+        "steady_state_mb": 0.0
+      },
+      "ttft_ms": {
+        "mean": 31.318999407407407,
+        "std": 11.862818238565541,
+        "min": 16.730774,
+        "max": 61.103454,
+        "p50": 29.015361,
+        "p90": 52.602437,
+        "p95": 55.219405,
+        "p99": 61.103454,
+        "jitter": 11.862818238565541
+      },
+      "per_token_latency_ms": {
+        "mean": 7.707815685608847,
+        "std": 1.6606135233827704,
+        "min": 5.158578777777778,
+        "max": 11.51372446996997,
+        "p50": 7.560679138138139,
+        "p90": 10.112272386392812,
+        "p95": 10.514226673851923,
+        "p99": 11.51372446996997,
+        "jitter": 1.6606135233827704
+      },
+      "raw_results": [
+        {
+          "run": 1,
+          "prompt": "Hello...",
+          "total_ms": 195.15618402510881,
+          "tokens": 10,
+          "tps": 177.64270300355264,
+          "ttft_ms": 17.705732,
+          "per_token_ms": 5.6292771
+        },
+        {
+          "run": 2,
+          "prompt": "Hi there...",
+          "total_ms": 178.61727892886847,
+          "tokens": 9,
+          "tps": 193.85184235390932,
+          "ttft_ms": 19.330189,
+          "per_token_ms": 5.158578777777778
+        },
+        {
+          "run": 3,
+          "prompt": "What is 2+2?...",
+          "total_ms": 7150.095900986344,
+          "tokens": 515,
+          "tps": 135.30118753823402,
+          "ttft_ms": 28.22156,
+          "per_token_ms": 7.390918130097088
+        },
+        {
+          "run": 4,
+          "prompt": "What is the capital of France?...",
+          "total_ms": 16085.826350958087,
+          "tokens": 1067,
+          "tps": 118.23663771189186,
+          "ttft_ms": 26.142924,
+          "per_token_ms": 8.457615332708528
+        },
+        {
+          "run": 5,
+          "prompt": "Explain what an LLM is in one ...",
+          "total_ms": 9119.917348958552,
+          "tokens": 606,
+          "tps": 123.54717109850702,
+          "ttft_ms": 32.747115,
+          "per_token_ms": 8.094074442244224
+        },
+        {
+          "run": 7,
+          "prompt": "Explain the concept of machine...",
+          "total_ms": 13577.77829398401,
+          "tokens": 666,
+          "tps": 86.8528687314165,
+          "ttft_ms": 55.219405,
+          "per_token_ms": 11.51372446996997
+        },
+        {
+          "run": 8,
+          "prompt": "What are the main differences ...",
+          "total_ms": 14313.76636296045,
+          "tokens": 779,
+          "tps": 98.88974127572072,
+          "ttft_ms": 52.602437,
+          "per_token_ms": 10.112272386392812
+        },
+        {
+          "run": 9,
+          "prompt": "Describe the process of photos...",
+          "total_ms": 11286.980103002861,
+          "tokens": 642,
+          "tps": 105.35464148089723,
+          "ttft_ms": 49.112801,
+          "per_token_ms": 9.491750775700934
+        },
+        {
+          "run": 10,
+          "prompt": "Hello...",
+          "total_ms": 254.95617499109358,
+          "tokens": 10,
+          "tps": 134.18953052746068,
+          "ttft_ms": 23.086181,
+          "per_token_ms": 7.4521462
+        },
+        {
+          "run": 11,
+          "prompt": "Hi there...",
+          "total_ms": 243.7811359995976,
+          "tokens": 9,
+          "tps": 134.4420118739185,
+          "ttft_ms": 25.94866,
+          "per_token_ms": 7.438151111111111
+        },
+        {
+          "run": 12,
+          "prompt": "What is 2+2?...",
+          "total_ms": 8521.152105997317,
+          "tokens": 515,
+          "tps": 113.29748819921852,
+          "ttft_ms": 34.596605,
+          "per_token_ms": 8.826321005825243
+        },
+        {
+          "run": 13,
+          "prompt": "What is the capital of France?...",
+          "total_ms": 19683.90892399475,
+          "tokens": 1067,
+          "tps": 95.10922971509865,
+          "ttft_ms": 29.015361,
+          "per_token_ms": 10.514226673851923
+        },
+        {
+          "run": 14,
+          "prompt": "Explain what an LLM is in one ...",
+          "total_ms": 10665.094130905345,
+          "tokens": 606,
+          "tps": 106.35141047926358,
+          "ttft_ms": 37.126381,
+          "per_token_ms": 9.402790198019803
+        },
+        {
+          "run": 16,
+          "prompt": "Explain the concept of machine...",
+          "total_ms": 9578.56590906158,
+          "tokens": 666,
+          "tps": 132.26325065902162,
+          "ttft_ms": 61.103454,
+          "per_token_ms": 7.560679138138139
+        },
+        {
+          "run": 17,
+          "prompt": "What are the main differences ...",
+          "total_ms": 11199.111957917921,
+          "tokens": 779,
+          "tps": 127.21735655444796,
+          "ttft_ms": 35.958305,
+          "per_token_ms": 7.860562639281129
+        },
+        {
+          "run": 18,
+          "prompt": "Describe the process of photos...",
+          "total_ms": 8867.647381033748,
+          "tokens": 642,
+          "tps": 135.0585461536589,
+          "ttft_ms": 31.168507,
+          "per_token_ms": 7.404196390965732
+        },
+        {
+          "run": 19,
+          "prompt": "Hello...",
+          "total_ms": 189.65772399678826,
+          "tokens": 10,
+          "tps": 186.81375485017546,
+          "ttft_ms": 16.730774,
+          "per_token_ms": 5.3529249
+        },
+        {
+          "run": 20,
+          "prompt": "Hi there...",
+          "total_ms": 180.7499040151015,
+          "tokens": 9,
+          "tps": 178.7593280341521,
+          "ttft_ms": 18.214727,
+          "per_token_ms": 5.594113666666667
+        },
+        {
+          "run": 21,
+          "prompt": "What is 2+2?...",
+          "total_ms": 6875.028252019547,
+          "tokens": 515,
+          "tps": 142.51776709712243,
+          "ttft_ms": 26.857037,
+          "per_token_ms": 7.016669011650486
+        },
+        {
+          "run": 22,
+          "prompt": "What is the capital of France?...",
+          "total_ms": 15960.28496301733,
+          "tokens": 1067,
+          "tps": 119.55812060400541,
+          "ttft_ms": 24.486347,
+          "per_token_ms": 8.364132816307405
+        },
+        {
+          "run": 23,
+          "prompt": "Explain what an LLM is in one ...",
+          "total_ms": 8593.39704096783,
+          "tokens": 606,
+          "tps": 133.05750182391205,
+          "ttft_ms": 29.973774,
+          "per_token_ms": 7.515547686468646
+        },
+        {
+          "run": 25,
+          "prompt": "Explain the concept of machine...",
+          "total_ms": 9747.234320035204,
+          "tokens": 666,
+          "tps": 127.45877722485606,
+          "ttft_ms": 39.771734,
+          "per_token_ms": 7.845673885885885
+        },
+        {
+          "run": 26,
+          "prompt": "What are the main differences ...",
+          "total_ms": 11298.145153094083,
+          "tokens": 779,
+          "tps": 125.64517314555263,
+          "ttft_ms": 35.603649,
+          "per_token_ms": 7.95892094351733
+        },
+        {
+          "run": 27,
+          "prompt": "Describe the process of photos...",
+          "total_ms": 9617.354501970112,
+          "tokens": 642,
+          "tps": 118.5226575643865,
+          "ttft_ms": 30.535843,
+          "per_token_ms": 8.437205345794393
+        },
+        {
+          "run": 28,
+          "prompt": "Hello...",
+          "total_ms": 190.75073394924402,
+          "tokens": 10,
+          "tps": 192.93024853814822,
+          "ttft_ms": 17.124015,
+          "per_token_ms": 5.1832204
+        },
+        {
+          "run": 29,
+          "prompt": "Hi there...",
+          "total_ms": 176.28019710537046,
+          "tokens": 9,
+          "tps": 192.04452155340203,
+          "ttft_ms": 19.617834,
+          "per_token_ms": 5.207125888888889
+        },
+        {
+          "run": 30,
+          "prompt": "What is 2+2?...",
+          "total_ms": 7075.851861038245,
+          "tokens": 515,
+          "tps": 136.45907967396806,
+          "ttft_ms": 27.611633,
+          "per_token_ms": 7.3282041941747575
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,31 @@
+# Dockerfile for building and running BitNet T-MAC inference
+# Uses Modular's official MAX image with Mojo
+
+FROM ubuntu:22.04
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pixi
+RUN curl -fsSL https://pixi.sh/install.sh | bash
+ENV PATH="/root/.pixi/bin:$PATH"
+
+WORKDIR /app
+
+# Copy project files
+COPY pixi.toml .
+COPY src/ src/
+COPY models/ models/
+
+# Install dependencies
+RUN pixi install
+
+# Create bin directory and build
+RUN mkdir -p bin && pixi run mojo build -O3 src/bitnet_simple.mojo -o bin/bitnet_simple
+
+# Default command
+CMD ["./bin/bitnet_simple", "models/bitnet-2b.tmac2.bin", "-n", "32"]

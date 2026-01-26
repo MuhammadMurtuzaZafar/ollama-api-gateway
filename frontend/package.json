@@ -1,5 +1,5 @@
 {
-  "name": "ollama-api-frontend",
+  "name": "edgellm-api-frontend",
   "version": "1.0.0",
   "type": "module",
   "scripts": {

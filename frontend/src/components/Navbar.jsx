@@ -23,7 +23,7 @@ const Navbar = () => {
               <Zap className="h-8 w-8 text-primary-600 dark:text-primary-400" />
               <div className="border-l border-gray-300 dark:border-gray-600 pl-3">
                 <span className="text-xl font-bold text-gray-900 dark:text-white">
-                  Ollama API Gateway
+                  EdgeLLM API Gateway
                 </span>
               </div>
             </Link>

@@ -207,7 +207,7 @@ const Playground = () => {
                     </option>
                   ))
                 ) : (
-                  <option value="functiongemma">functiongemma</option>
+                  <option value="smollm-135m">smollm-135m</option>
                 )}
               </select>
             </div>

@@ -1,0 +1,139 @@
+# EdgeLLM Full Stack Deployment with Multi-tenant API
+#
+# Services:
+#   - api: FastAPI gateway with authentication, rate limiting, usage tracking
+#   - edgellm: Mojo BitNet inference server
+#   - db: PostgreSQL database for API keys and usage logs
+#
+# Usage:
+#   # Start full stack
+#   docker compose -f docker-compose.fullstack.yml up -d
+#
+#   # With GPU support
+#   docker compose -f docker-compose.fullstack.yml --profile gpu up -d
+#
+# Access:
+#   - API Gateway: http://localhost:8000
+#   - API Docs: http://localhost:8000/docs
+#   - EdgeLLM Direct: http://localhost:8080 (for testing)
+#
+# API Keys (demo):
+#   - Admin: edgellm-admin-demo-key-12345
+#   - User: edgellm-user-demo-key-67890
+
+version: '3.8'
+
+services:
+  # PostgreSQL Database for API keys and usage logs
+  db:
+    image: postgres:15-alpine
+    container_name: edgellm-db
+    environment:
+      POSTGRES_DB: edgellm
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - edgellm_postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - edgellm-network
+    restart: unless-stopped
+
+  # EdgeLLM BitNet Inference Server (CPU)
+  edgellm:
+    build:
+      context: .
+      dockerfile: Dockerfile.mojo
+    container_name: edgellm-inference
+    command: >
+      bash -c "
+        echo 'Starting EdgeLLM server...' &&
+        cd /workspace &&
+        pixi run mojo run src/bitnet_server.mojo /workspace/models/smollm-135m.tmac2.bin --server
+      "
+    volumes:
+      - ./models:/workspace/models:ro
+      - ./src:/workspace/src:ro
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "echo", "ok"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    networks:
+      - edgellm-network
+    restart: unless-stopped
+
+  # EdgeLLM BitNet Inference Server (GPU)
+  edgellm-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.mojo
+    container_name: edgellm-inference-gpu
+    command: >
+      bash -c "
+        echo 'Starting EdgeLLM GPU server...' &&
+        cd /workspace &&
+        pixi run mojo run src/bitnet_tmac_lut.mojo /workspace/models/smollm-135m.tmac2.bin -n 64
+      "
+    volumes:
+      - ./models:/workspace/models:ro
+      - ./src:/workspace/src:ro
+    ports:
+      - "8081:8080"
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - edgellm-network
+    profiles:
+      - gpu
+    restart: unless-stopped
+
+  # API Gateway (FastAPI with Auth, Rate Limiting, Usage Tracking)
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: edgellm-api
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/edgellm
+      - EDGELLM_BASE_URL=http://edgellm:8080
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - DEMO_ADMIN_KEY=${DEMO_ADMIN_KEY:-edgellm-admin-demo-key-12345}
+      - DEMO_USER_KEY=${DEMO_USER_KEY:-edgellm-user-demo-key-67890}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=60
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - edgellm-network
+    restart: unless-stopped
+
+networks:
+  edgellm-network:
+    driver: bridge
+
+volumes:
+  edgellm_postgres_data:

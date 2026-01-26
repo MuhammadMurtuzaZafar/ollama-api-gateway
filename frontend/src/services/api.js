@@ -109,7 +109,7 @@ export const apiService = {
     }
   },
 
-  // Ollama API proxied calls
+  // EdgeLLM API proxied calls
   generateCompletion: async (model, prompt, options = {}) => {
     try {
       const response = await api.post('/api/generate', { model, prompt, ...options });

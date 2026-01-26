@@ -1,0 +1,39 @@
+# Fly.io configuration for BitNet T-MAC Inference API
+app = "bitnet-inference"
+primary_region = "sjc"  # San Jose - good for West Coast
+
+[build]
+  dockerfile = "Dockerfile.flyio"
+
+[env]
+  MODEL_PATH = "/app/models/bitnet-2b.tmac2.bin"
+  BINARY_PATH = "/app/bin/bitnet_server"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true    # Scale to zero when idle (cost savings)
+  auto_start_machines = true   # Auto-start on request
+  min_machines_running = 0     # Allow full scale-down
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 5             # Low limit due to slow inference
+    soft_limit = 2
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 2                     # 2 shared CPUs
+  memory_mb = 2048             # 2GB RAM (minimum for 657MB model)
+
+[checks]
+  [checks.health]
+    grace_period = "180s"      # 3 min for model loading (657MB)
+    interval = "30s"
+    method = "GET"
+    path = "/health"
+    port = 8080
+    timeout = "10s"
+    type = "http"

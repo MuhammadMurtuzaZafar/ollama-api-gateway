@@ -1,5 +1,6 @@
 """
-Ollama API Service with Authentication, Authorization, and Monitoring
+EdgeLLM API Service with Authentication, Authorization, and Monitoring
+High-performance LLM inference with deterministic latency for edge devices.
 """
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+EDGELLM_BASE_URL = os.getenv("EDGELLM_BASE_URL", "http://localhost:8080")
 
 # Security
 security = HTTPBearer()
@@ -42,7 +43,7 @@ security = HTTPBearer()
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events"""
     # Startup
-    logger.info("Starting Ollama API Service...")
+    logger.info("Starting EdgeLLM API Service...")
     try:
         await init_db()
         logger.info("Database initialized - tables created successfully")
@@ -60,14 +61,14 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
-    logger.info("Shutting down Ollama API Service...")
+    logger.info("Shutting down EdgeLLM API Service...")
     await close_db()
     logger.info("Database connections closed")
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Ollama API Service",
-    description="Secure API gateway for Ollama with authentication, authorization, and monitoring",
+    title="EdgeLLM API Service",
+    description="High-performance LLM inference with deterministic latency for edge devices. Features BitNet 1.58-bit quantization and 15.5x lower jitter than traditional inference.",
     version="1.0.0",
     dopenapi_version="3.0.3",
     lifespan=lifespan
@@ -284,11 +285,12 @@ async def require_admin(key_data: APIKey = Depends(verify_api_key)) -> APIKey:
 async def root():
     """Root endpoint - API information"""
     return {
-        "service": "Ollama API Service",
+        "service": "EdgeLLM API Service",
         "version": "1.0.0",
         "status": "running",
         "documentation": "/docs",
-        "health": "/health"
+        "health": "/health",
+        "features": ["BitNet 1.58-bit quantization", "15.5x lower jitter", "Edge deployment ready"]
     }
 
 @app.get("/health", tags=["General"])
@@ -296,15 +298,15 @@ async def health_check():
     """Health check endpoint"""
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5.0)
-            ollama_status = "healthy" if response.status_code == 200 else "unhealthy"
+            response = await client.get(f"{EDGELLM_BASE_URL}/health", timeout=5.0)
+            edgellm_status = "healthy" if response.status_code == 200 else "unhealthy"
     except Exception as e:
-        logger.error(f"Ollama health check failed: {e}")
-        ollama_status = "unreachable"
-    
+        logger.error(f"EdgeLLM health check failed: {e}")
+        edgellm_status = "unreachable"
+
     return {
         "status": "healthy",
-        "ollama_backend": ollama_status,
+        "edgellm_backend": edgellm_status,
         "timestamp": datetime.now().isoformat()
     }
 
@@ -329,7 +331,7 @@ async def create_api_key(
         )
     
     # Generate secure API key
-    api_key = f"ollama-{secrets.token_urlsafe(32)}"
+    api_key = f"edgellm-{secrets.token_urlsafe(32)}"
     
     new_key = APIKey(
         key=api_key,
@@ -430,17 +432,17 @@ async def revoke_api_key(
     
     raise HTTPException(status_code=404, detail="API key not found")
 
-@app.get("/api/models", tags=["Ollama"])
+@app.get("/api/models", tags=["EdgeLLM"])
 async def list_models(
     key_data: APIKey = Depends(verify_api_key),
     db: AsyncSession = Depends(get_db)
 ):
-    """List available Ollama models"""
+    """List available EdgeLLM models"""
     start_time = time.time()
     
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            response = await client.get(f"{EDGELLM_BASE_URL}/api/tags")
             response.raise_for_status()
             
             response_time = time.time() - start_time
@@ -451,13 +453,13 @@ async def list_models(
         logger.error(f"Error fetching models: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching models: {str(e)}")
 
-@app.post("/api/generate", tags=["Ollama"])
+@app.post("/api/generate", tags=["EdgeLLM"])
 async def generate(
     request: GenerateRequest,
     key_data: APIKey = Depends(verify_api_key),
     db: AsyncSession = Depends(get_db)
 ):
-    """Generate text using Ollama model"""
+    """Generate text using EdgeLLM with deterministic latency"""
     start_time = time.time()
     
     try:
@@ -477,7 +479,7 @@ async def generate(
         
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
-                f"{OLLAMA_BASE_URL}/api/generate",
+                f"{EDGELLM_BASE_URL}/api/generate",
                 json=payload
             )
             response.raise_for_status()
@@ -493,13 +495,13 @@ async def generate(
         logger.error(f"Error generating text: {e}")
         raise HTTPException(status_code=500, detail=f"Error generating text: {str(e)}")
 
-@app.post("/api/chat", tags=["Ollama"])
+@app.post("/api/chat", tags=["EdgeLLM"])
 async def chat(
     request: ChatRequest,
     key_data: APIKey = Depends(verify_api_key),
     db: AsyncSession = Depends(get_db)
 ):
-    """Chat with Ollama model"""
+    """Chat with EdgeLLM model"""
     start_time = time.time()
     
     try:
@@ -516,7 +518,7 @@ async def chat(
         
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
-                f"{OLLAMA_BASE_URL}/api/chat",
+                f"{EDGELLM_BASE_URL}/api/chat",
                 json=payload
             )
             response.raise_for_status()
